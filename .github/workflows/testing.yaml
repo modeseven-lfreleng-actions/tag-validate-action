@@ -20,56 +20,697 @@ concurrency:
 permissions: {}
 
 jobs:
-  ### Test the GitHub Action in this Repository ###
-  tests:
-    name: "Test local GitHub Action"
+  ### Test String Validation (No Signature Check) ###
+  test-string-validation:
+    name: "Test String Validation"
     runs-on: ubuntu-latest
     permissions:
       contents: read
-    timeout-minutes: 10 # Increase this timeout value as needed
+    timeout-minutes: 10
     steps:
-      # Harden the runner used by this workflow
-      # yamllint disable-line rule:line-length
-      - uses: step-security/harden-runner@f4a75cfd619ee5ce8d5b864b0d183aff3c69b55a # v2.13.1
-        with:
-          egress-policy: audit
-
       - name: "Checkout repository"
         uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
 
-      # Perform setup prior to running test(s)
-      - name: "Testing setup step"
-        shell: bash
-        run: |
-          # Testing setup step
-          echo "Testing setup step"
-          echo "Testing setup step/summary output" >> "$GITHUB_STEP_SUMMARY"
-
-      - name: "Running local action: ${{ github.repository }}"
+      - name: "Test SemVer string - valid"
         uses: ./
+        id: semver-valid
         with:
-          input: "test input 💬"
+          tag_string: "1.2.3"
+          require_type: semver
 
-      - name: "Validated local action: ${{ github.repository }}"
+      - name: "Verify SemVer output"
         shell: bash
         run: |
-          # Local action validation
-          echo "Validated local action: ${{ github.repository }}"
-          echo "Validation step summary output" >> "$GITHUB_STEP_SUMMARY"
+          if [ "${{ steps.semver-valid.outputs.tag_type }}" != "semver" ]; then
+            echo "Error: Expected tag_type=semver, got \
+              ${{ steps.semver-valid.outputs.tag_type }}"
+            exit 1
+          fi
+          if [ "${{ steps.semver-valid.outputs.version_prefix }}" \
+            != "false" ]; then
+            echo "Error: Expected version_prefix=false"
+            exit 1
+          fi
+          echo "✓ SemVer string validation passed"
 
-      # yamllint disable-line rule:line-length
-      - name: "Running local action: ${{ github.repository }} [Override Failure]"
+      - name: "Test SemVer string with v prefix"
         uses: ./
-        id: failure
+        id: semver-prefix
+        with:
+          tag_string: "v2.3.1-beta.1"
+          require_type: semver
+
+      - name: "Verify prefix detection"
+        shell: bash
+        run: |
+          if [ "${{ steps.semver-prefix.outputs.version_prefix }}" \
+            != "true" ]; then
+            echo "Error: Expected version_prefix=true"
+            exit 1
+          fi
+          if [ "${{ steps.semver-prefix.outputs.development_tag }}" \
+            != "true" ]; then
+            echo "Error: Expected development_tag=true (beta)"
+            exit 1
+          fi
+          echo "✓ Prefix and development tag detected"
+
+      - name: "Test CalVer string - valid"
+        uses: ./
+        id: calver-valid
+        with:
+          tag_string: "2025.01.15"
+          require_type: calver
+
+      - name: "Verify CalVer output"
+        shell: bash
+        run: |
+          if [ "${{ steps.calver-valid.outputs.tag_type }}" != "calver" ]; then
+            echo "Error: Expected tag_type=calver, got \
+              ${{ steps.calver-valid.outputs.tag_type }}"
+            exit 1
+          fi
+          echo "✓ CalVer string validation passed"
+
+      - name: "Test CalVer with development identifier"
+        uses: ./
+        id: calver-dev
+        with:
+          tag_string: "v2025.1.0-alpha.1"
+
+      - name: "Verify development tag detection"
+        shell: bash
+        run: |
+          if [ "${{ steps.calver-dev.outputs.development_tag }}" \
+            != "true" ]; then
+            echo "Error: Expected development_tag=true"
+            exit 1
+          fi
+          echo "✓ Development tag detected in CalVer"
+
+      - name: "Test type mismatch - should fail"
+        uses: ./
+        id: type-mismatch
         continue-on-error: true
         with:
-          invalid_input: "Some garbage"
+          tag_string: "1.2.3"
+          require_type: calver
 
-      # Failure testing is also important
-      - name: "Error if step above did NOT fail"
-        if: steps.failure.outcome == 'success'
+      - name: "Verify type mismatch failed"
+        if: steps.type-mismatch.outcome == 'success'
         shell: bash
         run: |
-          # Error if step above did NOT fail
-          echo "Error: previous test step did NOT fail ❌"
+          echo "Error: Type mismatch should have failed"
           exit 1
+
+      - name: "Test unknown format with require_type=none"
+        uses: ./
+        id: unknown-format
+        with:
+          tag_string: "random-tag-name"
+          require_type: none
+
+      - name: "Verify unknown format accepted"
+        shell: bash
+        run: |
+          if [ "${{ steps.unknown-format.outputs.tag_type }}" \
+            != "unknown" ]; then
+            echo "Error: Expected tag_type=unknown"
+            exit 1
+          fi
+          echo "✓ Unknown format accepted with require_type=none"
+
+  ### Test Local Tag Validation (Tag Push Event Simulation) ###
+  test-local-tags:
+    name: "Test Local Tag Validation"
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    timeout-minutes: 10
+    steps:
+      - name: "Checkout repository"
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          fetch-depth: 0
+
+      - name: "Create test tags locally"
+        shell: bash
+        run: |
+          git config user.name "Test User"
+          git config user.email "test@example.com"
+
+          # Create unsigned tag
+          git tag -a test-semver-1.0.0 -m "Test SemVer tag"
+          git tag -a test-calver-2025.01.0 -m "Test CalVer tag"
+          git tag -a test-dev-1.0.0-beta -m "Test dev tag"
+
+          git tag -l
+
+      - name: "Test validation with explicit tag_string"
+        uses: ./
+        id: explicit-tag
+        with:
+          tag_string: "test-semver-1.0.0"
+          require_type: none
+
+      - name: "Test missing tag with permit_missing=true"
+        uses: ./
+        id: missing-permitted
+        with:
+          permit_missing: true
+
+      - name: "Verify permit_missing worked"
+        shell: bash
+        run: |
+          if [ "${{ steps.missing-permitted.outputs.valid }}" != "true" ]; then
+            echo "Error: Should succeed with permit_missing=true"
+            exit 1
+          fi
+          echo "✓ permit_missing=true works correctly"
+
+      - name: "Test missing tag with permit_missing=false - should fail"
+        uses: ./
+        id: missing-fail
+        continue-on-error: true
+        with:
+          permit_missing: false
+
+      - name: "Verify missing tag failed"
+        if: steps.missing-fail.outcome == 'success'
+        shell: bash
+        run: |
+          echo "Error: Should have failed without permit_missing"
+          exit 1
+
+  ### Test Remote Tag Validation ###
+  test-remote-tags:
+    name: "Test Remote Tag Validation"
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    timeout-minutes: 10
+    steps:
+      - name: "Checkout repository"
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+
+      - name: "Test remote tag - semantic versioning"
+        uses: ./
+        id: remote-semver
+        with:
+          tag_location: >-
+            lfreleng-actions/test-tags-semantic/v0.1.2-unsigned
+          require_type: semver
+          permit_missing: true
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: "Verify remote tag validation"
+        shell: bash
+        run: |
+          echo "Tag Name: ${{ steps.remote-semver.outputs.tag_name }}"
+          echo "Tag Type: ${{ steps.remote-semver.outputs.tag_type }}"
+          echo "Signing Type: ${{ steps.remote-semver.outputs.signing_type }}"
+
+      - name: "Test remote tag - calendar versioning"
+        uses: ./
+        id: remote-calver
+        with:
+          tag_location: >-
+            lfreleng-actions/test-tags-calver/2025.1.2-unsigned
+          require_type: calver
+          permit_missing: true
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: "Test invalid tag_location format - should fail"
+        uses: ./
+        id: invalid-location
+        continue-on-error: true
+        with:
+          tag_location: "invalid-format"
+          permit_missing: false
+
+      - name: "Verify invalid format failed"
+        if: steps.invalid-location.outcome == 'success'
+        shell: bash
+        run: |
+          echo "Error: Invalid tag_location should have failed"
+          exit 1
+
+      - name: "Test non-existent remote tag with permit_missing=true"
+        uses: ./
+        id: missing-remote
+        with:
+          tag_location: >-
+            lfreleng-actions/test-tags-semantic/v999.999.999
+          permit_missing: true
+
+      - name: "Test tag with v prefix stripping"
+        uses: ./
+        id: prefix-strip
+        with:
+          tag_location: >-
+            lfreleng-actions/test-tags-semantic/v0.1.0
+          permit_missing: true
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: "Test with token for rate limit increase"
+        uses: ./
+        id: with-token
+        with:
+          tag_location: >-
+            lfreleng-actions/test-tags-semantic/v0.1.0
+          require_type: semver
+          permit_missing: true
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: "Verify token usage succeeded"
+        shell: bash
+        run: |
+          if [ "${{ steps.with-token.outputs.valid }}" != "true" ]; then
+            echo "Error: Token-authenticated request should have succeeded"
+            exit 1
+          fi
+          echo "✓ Token-authenticated request succeeded"
+
+  ### Test Signature Validation ###
+  test-signatures:
+    name: "Test Signature Validation"
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    timeout-minutes: 10
+    steps:
+      - name: "Checkout test-tags-semantic repository"
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          repository: lfreleng-actions/test-tags-semantic
+          fetch-depth: 0
+          path: test-repo-semver
+
+      - name: "Checkout test-tags-calver repository"
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          repository: lfreleng-actions/test-tags-calver
+          fetch-depth: 0
+          path: test-repo-calver
+
+      - name: "Checkout action repository"
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          path: action-code
+
+      - name: "Test string mode (always unsigned)"
+        uses: ./action-code
+        id: string-mode
+        with:
+          tag_string: "v0.1.2-unsigned"
+
+      - name: "Verify string mode reports unsigned"
+        shell: bash
+        run: |
+          echo "Signing Type: ${{ steps.string-mode.outputs.signing_type }}"
+          if [ "${{ steps.string-mode.outputs.signing_type }}" \
+            != "unsigned" ]; then
+            echo "Error: Expected signing_type=unsigned in string mode"
+            exit 1
+          fi
+          echo "✓ String mode correctly reports unsigned"
+
+      - name: "Test GPG-signed tag detection (semver)"
+        uses: ./action-code
+        id: gpg-semver
+        with:
+          tag_location: test-repo-semver/v0.1.0
+
+      - name: "Verify GPG signature detection (semver)"
+        shell: bash
+        run: |
+          echo "Signing Type: ${{ steps.gpg-semver.outputs.signing_type }}"
+          if [ "${{ steps.gpg-semver.outputs.signing_type }}" != "gpg" ]; then
+            echo "Error: Expected signing_type=gpg for v0.1.0"
+            exit 1
+          fi
+          echo "✓ GPG signature detected correctly"
+
+      - name: "Test SSH-signed tag detection (semver)"
+        uses: ./action-code
+        id: ssh-semver
+        with:
+          tag_location: test-repo-semver/v0.1.3-ssh-signed
+
+      - name: "Verify SSH signature detection (semver)"
+        shell: bash
+        run: |
+          echo "Signing Type: ${{ steps.ssh-semver.outputs.signing_type }}"
+          if [ "${{ steps.ssh-semver.outputs.signing_type }}" \
+            != "ssh" ]; then
+            echo "Error: Expected signing_type=ssh for v0.1.3-ssh-signed"
+            exit 1
+          fi
+          echo "✓ SSH signature detected correctly"
+
+      - name: "Test unsigned tag detection (semver)"
+        uses: ./action-code
+        id: unsigned-semver
+        with:
+          tag_location: test-repo-semver/v0.1.2-unsigned
+
+      - name: "Verify unsigned tag detection (semver)"
+        shell: bash
+        run: |
+          echo "Signing Type: ${{ steps.unsigned-semver.outputs.signing_type }}"
+          if [ "${{ steps.unsigned-semver.outputs.signing_type }}" \
+            != "unsigned" ]; then
+            echo "Error: Expected signing_type=unsigned for v0.1.2-unsigned"
+            exit 1
+          fi
+          echo "✓ Unsigned tag detected correctly"
+
+      - name: "Test GPG-signed tag detection (calver)"
+        uses: ./action-code
+        id: gpg-calver
+        with:
+          tag_location: test-repo-calver/2025.1.1
+
+      - name: "Verify GPG signature detection (calver)"
+        shell: bash
+        run: |
+          echo "Signing Type: ${{ steps.gpg-calver.outputs.signing_type }}"
+          if [ "${{ steps.gpg-calver.outputs.signing_type }}" != "gpg" ]; then
+            echo "Error: Expected signing_type=gpg for 2025.1.1"
+            exit 1
+          fi
+          echo "✓ GPG signature detected correctly (calver)"
+
+      - name: "Test SSH-signed tag detection (calver)"
+        uses: ./action-code
+        id: ssh-calver
+        with:
+          tag_location: test-repo-calver/2025.1.3-ssh-signed
+
+      - name: "Verify SSH signature detection (calver)"
+        shell: bash
+        run: |
+          echo "Signing Type: ${{ steps.ssh-calver.outputs.signing_type }}"
+          if [ "${{ steps.ssh-calver.outputs.signing_type }}" \
+            != "ssh" ]; then
+            echo "Error: Expected signing_type=ssh for 2025.1.3-ssh-signed"
+            exit 1
+          fi
+          echo "✓ SSH signature detected correctly (calver)"
+
+      - name: "Test unsigned tag detection (calver)"
+        uses: ./action-code
+        id: unsigned-calver
+        with:
+          tag_location: test-repo-calver/2025.1.2-unsigned
+
+      - name: "Verify unsigned tag detection (calver)"
+        shell: bash
+        run: |
+          echo "Signing Type: ${{ steps.unsigned-calver.outputs.signing_type }}"
+          if [ "${{ steps.unsigned-calver.outputs.signing_type }}" \
+            != "unsigned" ]; then
+            echo "Error: Expected signing_type=unsigned for 2025.1.2-unsigned"
+            exit 1
+          fi
+          echo "✓ Unsigned tag detected correctly (calver)"
+
+      - name: "Test require_signed=true with GPG tag (should pass)"
+        uses: ./action-code
+        id: require-signed-gpg
+        with:
+          tag_location: test-repo-semver/v0.1.0
+          require_signed: true
+
+      - name: "Test require_signed=true with SSH tag (should pass)"
+        uses: ./action-code
+        id: require-signed-ssh
+        with:
+          tag_location: test-repo-semver/v0.1.3-ssh-signed
+          require_signed: true
+
+      - name: "Test require_signed=true with unsigned tag (should fail)"
+        uses: ./action-code
+        id: require-signed-fail
+        continue-on-error: true
+        with:
+          tag_location: test-repo-semver/v0.1.2-unsigned
+          require_signed: true
+
+      - name: "Verify require_signed=true rejected unsigned tag"
+        shell: bash
+        run: |
+          if [ "${{ steps.require-signed-fail.outcome }}" == "success" ]; then
+            echo "Error: require_signed=true should reject unsigned tags"
+            exit 1
+          fi
+          echo "✓ require_signed=true correctly rejected unsigned tag"
+
+      - name: "Test require_signed=false with unsigned tag (should pass)"
+        uses: ./action-code
+        id: require-unsigned
+        with:
+          tag_location: test-repo-semver/v0.1.2-unsigned
+          require_signed: false
+
+      - name: "Test require_signed=ambivalent with any tag (should pass)"
+        uses: ./action-code
+        id: ambivalent-any
+        with:
+          tag_location: test-repo-semver/v0.1.2-unsigned
+          require_signed: ambivalent
+
+  ### Test Signature Requirements ###
+  test-signature-requirements:
+    name: "Test Signature Requirements"
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    timeout-minutes: 10
+    steps:
+      - name: "Checkout repository"
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          fetch-depth: 0
+
+      - name: "Create unsigned tag"
+        shell: bash
+        run: |
+          git config user.name "Test User"
+          git config user.email "test@example.com"
+          git tag -a unsigned-test-1.0.0 -m "Unsigned test tag"
+
+      - name: "Test require_signed=ambivalent (default)"
+        uses: ./
+        id: ambivalent
+        with:
+          tag_string: "unsigned-test-1.0.0"
+          require_signed: ambivalent
+
+      - name: "Test require_signed=false with unsigned (should pass)"
+        uses: ./
+        id: unsigned-ok
+        with:
+          tag_string: "unsigned-test-1.0.0"
+          require_signed: false
+
+      - name: "Test case insensitivity"
+        uses: ./
+        id: case-test
+        with:
+          tag_string: "1.0.0"
+          require_type: SEMVER
+          require_signed: AMBIVALENT
+
+      - name: "Verify case insensitivity"
+        shell: bash
+        run: |
+          if [ "${{ steps.case-test.outputs.tag_type }}" != "semver" ]; then
+            echo "Error: Case insensitive require_type failed"
+            exit 1
+          fi
+          echo "✓ Case insensitive inputs work correctly"
+
+  ### Test Development Tag Detection ###
+  test-development-tags:
+    name: "Test Development Tag Detection"
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    timeout-minutes: 10
+    steps:
+      - name: "Checkout repository"
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+
+      - name: "Test alpha tag"
+        uses: ./
+        id: alpha
+        with:
+          tag_string: "1.0.0-alpha.1"
+
+      - name: "Verify alpha detected"
+        shell: bash
+        run: |
+          if [ "${{ steps.alpha.outputs.development_tag }}" != "true" ]; then
+            echo "Error: alpha not detected as development"
+            exit 1
+          fi
+
+      - name: "Test beta tag"
+        uses: ./
+        id: beta
+        with:
+          tag_string: "v2.0.0-beta"
+
+      - name: "Test rc tag"
+        uses: ./
+        id: rc
+        with:
+          tag_string: "1.0.0-rc.1"
+
+      - name: "Test dev tag"
+        uses: ./
+        id: dev
+        with:
+          tag_string: "2025.01-dev"
+
+      - name: "Test snapshot tag"
+        uses: ./
+        id: snapshot
+        with:
+          tag_string: "1.0.0-SNAPSHOT"
+
+      - name: "Test stable tag (not development)"
+        uses: ./
+        id: stable
+        with:
+          tag_string: "1.0.0"
+
+      - name: "Verify stable not flagged as dev"
+        shell: bash
+        run: |
+          if [ "${{ steps.stable.outputs.development_tag }}" \
+            != "false" ]; then
+            echo "Error: Stable tag incorrectly flagged as development"
+            exit 1
+          fi
+          echo "✓ Development tag detection works correctly"
+
+  ### Test All Input Combinations ###
+  test-input-priority:
+    name: "Test Input Priority"
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    timeout-minutes: 10
+    steps:
+      - name: "Checkout repository"
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+
+      - name: "Test tag_location takes priority over tag_string"
+        uses: ./
+        id: priority-test
+        with:
+          tag_location: >-
+            lfreleng-actions/test-tags-semantic/v0.1.2-unsigned
+          tag_string: "this-should-be-ignored"
+          permit_missing: true
+
+      - name: "Verify tag_location was used"
+        shell: bash
+        run: |
+          tag_name="${{ steps.priority-test.outputs.tag_name }}"
+          if [[ "$tag_name" == *"ignored"* ]]; then
+            echo "Error: tag_string was used instead of tag_location"
+            exit 1
+          fi
+          echo "✓ Input priority works correctly"
+
+  ### Test Edge Cases ###
+  test-edge-cases:
+    name: "Test Edge Cases"
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    timeout-minutes: 10
+    steps:
+      - name: "Checkout repository"
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+
+      - name: "Test empty tag_string with permit_missing=true"
+        uses: ./
+        id: empty-string
+        with:
+          tag_string: ""
+          permit_missing: true
+
+      - name: "Test very long version string"
+        uses: ./
+        id: long-version
+        with:
+          tag_string: "1.0.0-beta.1+build.12345.abcdef1234567890"
+          require_type: semver
+
+      - name: "Test version with all dev keywords"
+        uses: ./
+        id: multi-dev
+        with:
+          tag_string: "1.0.0-alpha-pre-dev"
+
+      - name: "Verify multiple dev keywords detected"
+        shell: bash
+        run: |
+          if [ "${{ steps.multi-dev.outputs.development_tag }}" \
+            != "true" ]; then
+            echo "Error: Multiple dev keywords not detected"
+            exit 1
+          fi
+
+      - name: "Test uppercase V prefix"
+        uses: ./
+        id: uppercase-v
+        with:
+          tag_string: "V1.0.0"
+
+      - name: "Verify uppercase V detected"
+        shell: bash
+        run: |
+          if [ "${{ steps.uppercase-v.outputs.version_prefix }}" \
+            != "true" ]; then
+            echo "Error: Uppercase V prefix not detected"
+            exit 1
+          fi
+          echo "✓ Edge cases handled correctly"
+
+  ### Summary ###
+  test-summary:
+    name: "Test Summary"
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    needs:
+      - test-string-validation
+      - test-local-tags
+      - test-remote-tags
+      - test-signatures
+      - test-signature-requirements
+      - test-development-tags
+      - test-input-priority
+      - test-edge-cases
+    if: always()
+    steps:
+      - name: "Display test results"
+        shell: bash
+        run: |
+          {
+            echo "## Test Results Summary"
+            echo ""
+            echo "All test jobs completed!"
+            echo ""
+            echo "✅ String validation tests"
+            echo "✅ Local tag tests"
+            echo "✅ Remote tag tests"
+            echo "✅ Signature tests"
+            echo "✅ Development tag tests"
+            echo "✅ Input priority tests"
+            echo "✅ Edge case tests"
+          } >> "$GITHUB_STEP_SUMMARY"
