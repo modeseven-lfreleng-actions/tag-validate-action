@@ -423,8 +423,10 @@ For remote tag validation, the action can use authenticated or anonymous API cal
 
 ### Type Validation
 
-| require_type | tag_type | Result |
-| ------------ | -------- | ------ |
+<!-- markdownlint-disable MD060 -->
+
+| require_type | tag_type | Result  |
+| ------------ | -------- | ------- |
 | `none`       | any      | ✅ Pass |
 | `semver`     | `semver` | ✅ Pass |
 | `semver`     | `both`   | ✅ Pass |
@@ -433,10 +435,14 @@ For remote tag validation, the action can use authenticated or anonymous API cal
 | `calver`     | `both`   | ✅ Pass |
 | `calver`     | `semver` | ❌ Fail |
 
+<!-- markdownlint-enable MD060 -->
+
 ### Signature Validation
 
-| require_signed | signing_type | Result          |
-| -------------- | ------------ | --------------- |
+<!-- markdownlint-disable MD060 -->
+
+| require_signed | signing_type | Result           |
+| -------------- | ------------ | ---------------- |
 | `ambivalent`   | any          | ✅ Pass (always) |
 | `true`         | `unsigned`   | ❌ Fail          |
 | `true`         | `ssh`/`gpg`  | ✅ Pass          |
@@ -448,6 +454,8 @@ For remote tag validation, the action can use authenticated or anonymous API cal
 | `gpg`          | `unsigned`   | ❌ Fail          |
 | `false`        | `unsigned`   | ✅ Pass          |
 | `false`        | `ssh`/`gpg`  | ❌ Fail          |
+
+<!-- markdownlint-enable MD060 -->
 
 ## Troubleshooting
 
