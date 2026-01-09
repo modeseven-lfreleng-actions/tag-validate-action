@@ -327,7 +327,7 @@ jobs:
 
       - name: "Import GPG test key for signature verification"
         # yamllint disable-line rule:line-length
-        uses: crazy-max/ghaction-import-gpg@01dd5d3ca463c7f10f7f4f7b4f177225ac661ee4
+        uses: crazy-max/ghaction-import-gpg@e89d40939c28e39f97cf32126055eeae86ba74ec
         # Allow failure when GPG_PRIVATE_KEY secret is not set
         # (tests will then expect gpg-unverifiable instead of gpg)
         continue-on-error: true
