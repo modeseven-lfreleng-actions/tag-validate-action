@@ -10,7 +10,6 @@ works correctly with real Git repositories and signatures.
 These tests are meant to run in CI or locally with network access.
 """
 
-import os
 import shutil
 from collections.abc import Generator
 from pathlib import Path
@@ -28,13 +27,13 @@ CALVER_REPO = "lfreleng-actions/test-tags-calver"
 
 def is_ci_without_gpg_keys() -> bool:
     """
-    Check if we're running in a CI environment without GPG keys.
+    Check if we're running without GPG keys available.
 
-    This is common when CI is triggered by pull requests from forks,
-    where secrets (including GPG keys) are not available for security reasons.
+    This can happen in CI environments (especially for pull requests from forks)
+    or in local development environments where GPG keys haven't been set up.
 
     Returns:
-        True if in CI without keys, False otherwise
+        True if GPG keys are not available, False if they are available
     """
     # First, try to detect if the test GPG key is actually available
     # This is the most reliable method
@@ -47,24 +46,12 @@ def is_ci_without_gpg_keys() -> bool:
             check=False,
             timeout=5,
         )
-        # If key is found, GPG keys ARE available
-        if result.returncode == 0:
-            return False
+        # If key is found (returncode == 0), GPG keys ARE available
+        # Otherwise, key not found - GPG keys are NOT available
+        return result.returncode != 0
     except (subprocess.TimeoutExpired, FileNotFoundError):
-        # GPG command timed out or gpg binary not found - treat as keys unavailable
-        # Fall through to check CI environment variables below
-        pass
-
-    # Fallback: Check if we're in GitHub Actions
-    is_github_actions = os.getenv("GITHUB_ACTIONS") == "true"
-
-    # Check if triggered by a pull request
-    is_pull_request = os.getenv("GITHUB_EVENT_NAME") == "pull_request"
-
-    # If in GitHub Actions on a PR, keys are typically not available
-    # (this is GitHub's default security behavior for PRs from forks)
-    # Return True if both conditions are met
-    return is_github_actions and is_pull_request
+        # GPG command timed out or gpg binary not found - keys unavailable
+        return True
 
 
 @pytest.fixture(scope="module")
