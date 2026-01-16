@@ -49,6 +49,22 @@ app = CustomTyper(
 # Initialize Rich console (will be reconfigured for JSON output if needed)
 console = Console()
 
+# Tag location format examples (used in error messages)
+TAG_LOCATION_FORMATS = {
+    "local": "v1.0.0 (local tag)",
+    "remote": "owner/repo@v1.0.0 (remote tag)",
+    "path": "./path/to/repo/v1.0.0 (local repository path)",
+}
+
+TAG_LOCATION_FORMAT_EXAMPLES = [
+    (
+        "Expected formats: "
+        "'v1.0.0' (local), "
+        "'owner/repo@v1.0.0' (remote), "
+        "or './path/to/repo/v1.0.0' (local repository path)"
+    )
+]
+
 # Configure logging (will be suppressed for JSON output)
 logging.basicConfig(
     level=logging.INFO,
@@ -555,6 +571,29 @@ def validate(
         if json_output:
             _suppress_logging_for_json()
 
+        # Validate that version_string is not empty or whitespace
+        if not version_string or not version_string.strip():
+            error_msg = "Version string is empty or null"
+            info_msg = [
+                "version_string parameter is required but was not provided or is empty",
+                "Expected formats: 'v1.0.0' (SemVer), '2024.01.15' (CalVer), or other version strings"
+            ]
+
+            if json_output:
+                output = {
+                    "success": False,
+                    "version": "",
+                    "error": error_msg,
+                    "info": info_msg,
+                }
+                console.print_json(data=output)
+            else:
+                console.print(f"\n[red]❌ Error:[/red] {error_msg}")
+                console.print("\n[yellow]ℹ️  Info:[/yellow]")
+                for info in info_msg:
+                    console.print(f"  • {info}")
+            raise typer.Exit(1)
+
         validator = TagValidator()
 
         # Handle require_type=none - accept any format without validation
@@ -786,6 +825,27 @@ def verify(
             # Suppress ALL logs when JSON output is requested
             if json_output:
                 _suppress_logging_for_json()
+
+            # Validate tag_location is not empty or null
+            if not tag_location or not tag_location.strip():
+                error_msg = "Tag location is empty or null"
+                info_messages = [
+                    "tag_location parameter is required but was not provided or is empty",
+                ] + TAG_LOCATION_FORMAT_EXAMPLES
+
+                if json_output:
+                    console.print_json(data={
+                        "success": False,
+                        "tag_name": "",
+                        "error": error_msg,
+                        "info": info_messages
+                    })
+                else:
+                    console.print(f"[red]❌ Error:[/red] {error_msg}")
+                    console.print("\n[yellow]Expected formats:[/yellow]")
+                    for fmt in TAG_LOCATION_FORMATS.values():
+                        console.print(f"  • {fmt}")
+                raise typer.Exit(1)
 
             # Parse require_signed option
             # Support: true, false, gpg, ssh, gpg-unverifiable, signed, ambivalent, or None

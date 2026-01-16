@@ -112,6 +112,19 @@ runs:
       run: |
         pip install -e "${{ github.action_path }}"
 
+    - name: 'Fetch tag objects'
+      shell: bash
+      run: |
+        # Ensure we have the actual tag object, not just the ref
+        # This is necessary because checkout might only fetch tag refs, not tag objects
+        if [[ "${GITHUB_REF:-}" == refs/tags/* ]]; then
+          TAG_NAME="${GITHUB_REF_NAME:-}"
+          echo "Fetching tag object for: ${TAG_NAME}"
+          git fetch origin "refs/tags/${TAG_NAME}:refs/tags/${TAG_NAME}" --force || true
+          TAG_TYPE=$(git cat-file -t "${TAG_NAME}" 2>/dev/null || echo "unknown")
+          echo "Tag object type: ${TAG_TYPE}"
+        fi
+
     - name: 'Validate tag'
       id: validate
       shell: bash
@@ -215,10 +228,8 @@ runs:
           COMMON_ARGS+=("--permit-missing")
         fi
 
-        # Add GitHub token if provided (applies to both for remote tags)
-        if [ -n "${{ inputs.token }}" ]; then
-          COMMON_ARGS+=("--token" "${{ inputs.token }}")
-        fi
+        # GitHub token is passed via GITHUB_TOKEN environment variable (see env section below)
+        # This is more secure than passing it as a CLI argument
 
         # Enable debug output
         if [ "${DEBUG}" = "true" ]; then
@@ -231,23 +242,77 @@ runs:
           CLI_CMD="python -m tag_validate.cli"
           echo "Using local action code: ${CLI_CMD}"
         else
-          CLI_CMD="uvx --from tag-validate tag-validate"
-          echo "Using PyPI package via uvx: ${CLI_CMD}"
+          # Use PyPI package via uvx
+          # The --quiet flag is critical to suppress uvx's download progress output,
+          # which would otherwise mix with the JSON output from tag-validate and cause parsing errors
+          CLI_CMD="uvx --quiet --from tag-validate tag-validate"
+          echo "Using PyPI package via uvx"
         fi
 
         # Execute validation and capture output
+        # Display exact command being executed for debugging
+        # Note: This is safe to log because sensitive data (GITHUB_TOKEN) is passed via
+        # environment variable (see env section below), NOT as a CLI argument
         EXIT_CODE=0
         if [ "${USE_VERSION_ONLY}" = "true" ]; then
           # validate command only uses common args (no signature args)
+          echo "🔍 Executing: ${CLI_CMD} validate \"${TAG_LOCATION}\" ${COMMON_ARGS[@]} --json"
           JSON_OUTPUT=$(${CLI_CMD} validate "${TAG_LOCATION}" "${COMMON_ARGS[@]}" --json 2>&1) || EXIT_CODE=$?
         else
           # verify command uses both common and verify-specific args
           ALL_VERIFY_ARGS=("${COMMON_ARGS[@]}" "${VERIFY_ARGS[@]}")
+          echo "🔍 Executing: ${CLI_CMD} verify \"${TAG_LOCATION}\" ${ALL_VERIFY_ARGS[@]} --json"
           JSON_OUTPUT=$(${CLI_CMD} verify "${TAG_LOCATION}" "${ALL_VERIFY_ARGS[@]}" --json 2>&1) || EXIT_CODE=$?
         fi
 
-        # Display output
-        echo "${JSON_OUTPUT}"
+        # Extract and validate JSON from output using Python
+        # This handles cases where uvx might include non-JSON output
+        # Python is already available from the setup-python step above
+        cat > /tmp/extract_json.py << 'EOF'
+        import json
+        import sys
+
+        # Read raw output from stdin
+        text = sys.stdin.read()
+
+        # Try to find the first valid JSON object in the output
+        decoder = json.JSONDecoder()
+        start = text.find('{')
+        max_attempts = 10  # Prevent infinite loops in malformed data
+        attempts = 0
+        while start != -1 and attempts < max_attempts:
+            attempts += 1
+            try:
+                # Parse the JSON starting at this position without slicing
+                obj, _ = decoder.raw_decode(text, idx=start)
+                # Re-serialize to ensure we have clean, valid JSON only
+                clean_json = json.dumps(obj, ensure_ascii=False)
+                print(clean_json, end='')
+                sys.exit(0)
+            except (json.JSONDecodeError, ValueError):
+                # Not valid JSON at this position, search for the next candidate
+                start = text.find('{', start + 1)
+
+        # No valid JSON found
+        print('ERROR: No valid JSON object found in output', file=sys.stderr)
+        sys.exit(1)
+        EOF
+
+        EXTRACTED_JSON=$(echo "${JSON_OUTPUT}" | python3 /tmp/extract_json.py)
+        EXTRACT_EXIT_CODE=$?
+
+        if [ ${EXTRACT_EXIT_CODE} -ne 0 ]; then
+          echo "Error: Failed to extract valid JSON from tag-validate CLI output" >&2
+          echo "Raw output was:" >&2
+          echo "${JSON_OUTPUT}" >&2
+          exit 1
+        fi
+
+        # Display the extracted JSON
+        echo "${EXTRACTED_JSON}"
+
+        # Use the extracted JSON for further processing
+        JSON_OUTPUT="${EXTRACTED_JSON}"
 
         # Python CLI now handles permit_missing logic internally
         # If exit code is 0, validation succeeded (or was permitted to pass)
