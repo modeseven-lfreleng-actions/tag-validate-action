@@ -46,6 +46,14 @@ inputs:
       Requires a GitHub token.
     required: false
     default: 'false'
+  require_gerrit:
+    description: >-
+      Requires that the signing key is registered to a Gerrit account.
+      Set to 'true' to auto-detect Gerrit server from GitHub org
+      (pattern: gerrit.[org].org),
+      or provide a specific Gerrit server hostname/URL.
+    required: false
+    default: 'false'
   require_owner:
     description: >-
       GitHub username(s) or email address(es) that must own the signing key
@@ -159,6 +167,7 @@ runs:
         REQUIRE_TYPE=$(echo "${{ inputs.require_type }}" | tr '[:upper:]' '[:lower:]' | tr -d ' ')
         REQUIRE_SIGNED=$(echo "${{ inputs.require_signed }}" | tr '[:upper:]' '[:lower:]' | tr -d ' ')
         REQUIRE_GITHUB=$(echo "${{ inputs.require_github }}" | tr '[:upper:]' '[:lower:]')
+        REQUIRE_GERRIT="${{ inputs.require_gerrit }}"
         REQUIRE_OWNER="${{ inputs.require_owner }}"
         REJECT_DEVELOPMENT=$(echo "${{ inputs.reject_development }}" | tr '[:upper:]' '[:lower:]')
         PERMIT_MISSING=$(echo "${{ inputs.permit_missing }}" | tr '[:upper:]' '[:lower:]')
@@ -234,6 +243,11 @@ runs:
         # Add GitHub key verification if requested
         if [ "${REQUIRE_GITHUB}" = "true" ]; then
           VERIFY_ARGS+=("--require-github")
+        fi
+
+        # Add Gerrit key verification if requested
+        if [ -n "${REQUIRE_GERRIT}" ] && [ "${REQUIRE_GERRIT}" != "false" ]; then
+          VERIFY_ARGS+=("--require-gerrit" "${REQUIRE_GERRIT}")
         fi
 
         # Add require-owner if provided (comma or space separated values)
