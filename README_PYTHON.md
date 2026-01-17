@@ -69,11 +69,11 @@ variable:
 ```bash
 # ✅ SECURE: Set token in environment
 export GITHUB_TOKEN="your_token_here"
-tag-validate verify v1.2.3 --verify-github-key --owner username
+tag-validate verify v1.2.3 --require-github --owner username
 
 # ❌ INSECURE: Do NOT pass token as CLI argument
 # This exposes the token in process listings and shell history!
-tag-validate verify v1.2.3 --verify-github-key --owner username --token $GITHUB_TOKEN
+tag-validate verify v1.2.3 --require-github --owner username --token $GITHUB_TOKEN
 ```
 
 **Why?** Command-line arguments are visible to:
@@ -110,7 +110,7 @@ tag-validate verify torvalds/linux@v6.0
 # With GitHub key verification (token from GITHUB_TOKEN env var)
 export GITHUB_TOKEN="your_token_here"
 tag-validate verify torvalds/linux@v6.0 \
-  --verify-github-key \
+  --require-github \
   --owner torvalds
 ```
 
@@ -139,6 +139,34 @@ tag-validate detect v1.2.3 --json
 
 ## CLI Usage
 
+### Global Options
+
+These options can be used with any command:
+
+- `--version` / `-v` - Show version and exit
+- `--verbose` / `-V` - Enable verbose logging (DEBUG level)
+- `--quiet` / `-q` - Suppress all output except errors
+- `--help` - Show help message
+
+**Examples:**
+
+```bash
+# Show version
+tag-validate --version
+
+# Enable verbose logging to see detailed debug information
+tag-validate --verbose verify v1.2.3
+
+# Quiet mode - only show errors
+tag-validate --quiet verify v1.2.3
+```
+
+**Logging Levels:**
+
+- **Default**: Shows warnings and errors only
+- **Verbose** (`--verbose`): Shows all debug messages, warnings, and errors
+- **Quiet** (`--quiet`): Shows errors only
+
 ### Commands
 
 #### `verify` - Complete Tag Validation
@@ -156,11 +184,16 @@ tag-validate verify <tag-location> [OPTIONS]
 
 **Options:**
 
-- `--require-type semver|calver` - Require specific version type
-- `--require-signed` - Require tag to be signed
+- `--require-type TYPE[,TYPE...]` - Require specific version type(s): `semver`,
+  `calver`, `both` (comma or space-separated for multiple)
+- `--require-signed TYPE[,TYPE...]` - Require tag signature: `gpg`, `ssh`,
+  `gpg-unverifiable`, `unsigned` (comma or space-separated for multiple)
 - `--skip-version-validation` - Skip version format validation (only check signature)
-- `--verify-github-key` - Verify signing key on GitHub
-- `--owner USER` / `-o` - GitHub username for key verification
+- `--require-github` - Verify signing key is registered to a GitHub account
+- `--require-owner OWNER[,OWNER...]` - GitHub username(s) or email(s) that must
+  own the signing key (comma or space-separated). Implies `--require-github`
+- `--owner USER` / `-o` - GitHub username for key verification (optional,
+  auto-detected from tagger email if not provided)
 - `--token TOKEN` - GitHub API token (**NOT RECOMMENDED**: use `GITHUB_TOKEN`
   env var instead for security)
 - `--reject-development` - Reject development versions (alpha, beta, rc)
@@ -173,14 +206,30 @@ tag-validate verify <tag-location> [OPTIONS]
 # Basic validation
 tag-validate verify v1.2.3
 
-# Strict SemVer with signature required
-tag-validate verify v1.2.3 --require-type semver --require-signed true
+# Require SemVer with GPG or SSH signature
+tag-validate verify v1.2.3 --require-type semver --require-signed "gpg,ssh"
+
+# Accept either SemVer or CalVer
+tag-validate verify v1.2.3 --require-type "semver,calver"
 
 # Remote tag with GitHub verification
 tag-validate verify torvalds/linux@v6.0 \
   --require-type semver \
-  --verify-github-key \
+  --require-signed gpg \
+  --require-github \
   --owner torvalds
+
+# Require tag signed by specific GitHub user
+tag-validate verify v1.2.3 --require-owner octocat
+
+# Require tag signed by one of multiple owners
+tag-validate verify v1.2.3 --require-owner "octocat,monalisa"
+
+# Require tag signed by specific email address
+tag-validate verify v1.2.3 --require-owner user@example.com
+
+# Mixed usernames and emails
+tag-validate verify v1.2.3 --require-owner "octocat,user@example.com"
 
 # Reject development versions
 tag-validate verify v1.2.3-beta --reject-development
@@ -189,10 +238,13 @@ tag-validate verify v1.2.3-beta --reject-development
 # JSON output for automation
 tag-validate verify v1.2.3 --json | jq '.success'
 
+# Require any GPG signature (even unverifiable)
+tag-validate verify v1.2.3 --require-signed "gpg,gpg-unverifiable"
+
 # Only verify signature and GitHub key (skip version validation)
 # Useful for tags that don't follow SemVer/CalVer
 tag-validate verify my-custom-tag --skip-version-validation \
-  --require-signed --verify-github-key --owner username
+  --require-signed ssh --require-github --owner username
 ```
 
 #### `validate` - Version Format Check
@@ -205,7 +257,8 @@ tag-validate validate <version-string> [OPTIONS]
 
 **Options:**
 
-- `--require-type semver|calver` - Require specific version type
+- `--require-type TYPE[,TYPE...]` - Require specific version type(s): `semver`,
+  `calver` (comma or space-separated for multiple)
 - `--allow-prefix / --no-prefix` - Allow/disallow 'v' prefix
 - `--strict-semver` - Enforce strict SemVer (no prefix, exact format)
 - `--json` - Output results as JSON
@@ -250,13 +303,13 @@ tag-validate detect v1.2.3
 tag-validate detect v1.2.3 --json
 ```
 
-#### `verify-github` - Verify Specific Key on GitHub
+#### `github` - Verify Specific Key on GitHub
 
 Verifies if a specific GPG key ID or SSH fingerprint is registered on GitHub
 (without needing a tag). The key type is auto-detected by default.
 
 ```bash
-tag-validate verify-github <key-id-or-fingerprint> --owner <github-user> [OPTIONS]
+tag-validate github <key-id-or-fingerprint> --owner <github-user> [OPTIONS]
 ```
 
 **Options:**
@@ -275,19 +328,65 @@ tag-validate verify-github <key-id-or-fingerprint> --owner <github-user> [OPTION
 export GITHUB_TOKEN="your_token_here"
 
 # Verify a GPG key ID (auto-detected)
-tag-validate verify-github FCE8AAABF53080F6 --owner torvalds
+tag-validate github FCE8AAABF53080F6 --owner torvalds
 
 # Verify an SSH key (auto-detected)
-tag-validate verify-github "ssh-ed25519 AAAAC3NzaC1..." --owner torvalds
+tag-validate github "ssh-ed25519 AAAAC3NzaC1..." --owner torvalds
 
 # Verify an SSH fingerprint (auto-detected)
-tag-validate verify-github "SHA256:abc123..." --owner torvalds
+tag-validate github "SHA256:abc123..." --owner torvalds
 
 # Explicitly specify type if auto-detection fails
-tag-validate verify-github D9141D556C7E379A --owner torvalds --type gpg
+tag-validate github D9141D556C7E379A --owner torvalds --type gpg
 
 # Check GPG primary key only (exclude subkeys)
-tag-validate verify-github D9141D556C7E379A --owner torvalds --no-subkeys
+tag-validate github D9141D556C7E379A --owner torvalds --no-subkeys
+```
+
+### Exit Codes
+
+The CLI returns specific exit codes to help automation scripts handle different
+failure scenarios:
+
+| Exit Code | Name                   | Description                             |
+| --------- | ---------------------- | --------------------------------------- |
+| 0         | EXIT_SUCCESS           | Validation passed successfully          |
+| 1         | EXIT_VALIDATION_FAILED | Validation failed (type mismatch, etc.) |
+| 2         | EXIT_MISSING_TOKEN     | GitHub token required but not provided  |
+| 3         | EXIT_INVALID_INPUT     | Invalid input parameters or malformed   |
+| 4         | EXIT_UNEXPECTED_ERROR  | Unexpected error during execution       |
+
+**Example handling exit codes:**
+
+```bash
+#!/bin/bash
+
+export GITHUB_TOKEN="your_token_here"
+tag-validate verify v1.2.3 --require-github --owner myuser
+exit_code=$?
+
+case $exit_code in
+  0)
+    echo "✅ Validation passed"
+    ;;
+  1)
+    echo "❌ Validation failed - check requirements"
+    exit 1
+    ;;
+  2)
+    echo "❌ GitHub token not provided"
+    echo "Set GITHUB_TOKEN environment variable"
+    exit 1
+    ;;
+  3)
+    echo "❌ Invalid input - check command syntax"
+    exit 1
+    ;;
+  4)
+    echo "❌ Unexpected error occurred"
+    exit 1
+    ;;
+esac
 ```
 
 ### Output Formats
@@ -351,7 +450,7 @@ async def validate_tag():
     config = ValidationConfig(
         require_semver=True,
         require_signed=True,
-        verify_github_key=True,
+        require_github=True,
         reject_development=True,
     )
 
@@ -489,7 +588,7 @@ config = ValidationConfig(
     require_unsigned=False,   # Require tag to be unsigned
 
     # GitHub verification
-    verify_github_key=True,   # Verify key on GitHub
+    require_github=True,      # Verify key on GitHub
 
     # Version filtering
     reject_development=True,  # Reject alpha/beta/rc versions

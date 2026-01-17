@@ -115,62 +115,56 @@ class TagValidator:
         """
         logger.debug(f"Validating version: {tag}")
 
-        # Check if tag starts with a year-like number (prioritize CalVer)
-        clean_tag = tag.lstrip('v')
-        if clean_tag and clean_tag[0].isdigit():
-            first_component = clean_tag.split('.')[0] if '.' in clean_tag else clean_tag.split('-')[0]
-            try:
-                first_num = int(first_component)
-                # If first component >= 2000, likely a CalVer year
-                if first_num >= 2000:
-                    # Try CalVer first
-                    calver_result = self.validate_calver(tag, allow_prefix)
-                    if calver_result.is_valid:
-                        logger.debug(f"Tag '{tag}' validated as CalVer: {calver_result.normalized}")
-                        return calver_result
-                    # Then try SemVer
-                    semver_result = self.validate_semver(tag, allow_prefix, strict_semver)
-                    if semver_result.is_valid:
-                        logger.debug(f"Tag '{tag}' validated as SemVer: {semver_result.normalized}")
-                        return semver_result
-                    # Invalid - return result with errors
-                    logger.warning(f"Tag '{tag}' did not match CalVer or SemVer patterns")
-                    return VersionInfo(
-                        raw=tag,
-                        is_valid=False,
-                        version_type="unknown",
-                        errors=[
-                            "Version string does not match CalVer or SemVer patterns",
-                            f"CalVer validation: {calver_result.errors[0] if calver_result.errors else 'Failed'}",
-                            f"SemVer validation: {semver_result.errors[0] if semver_result.errors else 'Failed'}",
-                        ],
-                    )
-            except ValueError:
-                pass  # Not a number, fall through to normal validation
-
-        # Normal validation order: SemVer first, then CalVer
+        # Validate against both SemVer and CalVer to detect "both" case
         semver_result = self.validate_semver(tag, allow_prefix, strict_semver)
+        calver_result = self.validate_calver(tag, allow_prefix)
+
+        # Check if valid as both
+        if semver_result.is_valid and calver_result.is_valid:
+            logger.debug(f"Tag '{tag}' validated as both SemVer and CalVer")
+            # Return semver result but with type="both"
+            result = semver_result
+            result.version_type = "both"
+            return result
+
+        # Valid as SemVer only
         if semver_result.is_valid:
             logger.debug(f"Tag '{tag}' validated as SemVer: {semver_result.normalized}")
             return semver_result
 
-        # Then try CalVer
-        calver_result = self.validate_calver(tag, allow_prefix)
+        # Valid as CalVer only
         if calver_result.is_valid:
             logger.debug(f"Tag '{tag}' validated as CalVer: {calver_result.normalized}")
             return calver_result
 
-        # Invalid - return result with errors
-        logger.warning(f"Tag '{tag}' did not match SemVer or CalVer patterns")
+        # Other format (doesn't match SemVer or CalVer) - still valid, just different type
+        logger.debug(f"Tag '{tag}' does not match SemVer or CalVer patterns - type: other")
+
+        # Detect if it has a version prefix
+        has_prefix = tag[0:1] in ("v", "V") if tag else False
+
+        # Check if it's a development tag
+        is_dev = self.is_development_tag(tag)
+
         return VersionInfo(
             raw=tag,
-            is_valid=False,
-            version_type="unknown",
-            errors=[
-                "Version string does not match SemVer or CalVer patterns",
-                f"SemVer validation: {semver_result.errors[0] if semver_result.errors else 'Failed'}",
-                f"CalVer validation: {calver_result.errors[0] if calver_result.errors else 'Failed'}",
-            ],
+            normalized=tag,
+            is_valid=True,  # Changed: Accept other types as valid
+            version_type="other",  # Changed: Use "other" instead of "unknown"
+            has_prefix=has_prefix,
+            is_development=is_dev,
+            # All version-specific fields are None for "other" type
+            major=None,
+            minor=None,
+            patch=None,
+            prerelease=None,
+            build_metadata=None,
+            year=None,
+            month=None,
+            day=None,
+            micro=None,
+            modifier=None,
+            errors=[],  # No errors - this is a valid tag, just not semver/calver
         )
 
     def validate_semver(

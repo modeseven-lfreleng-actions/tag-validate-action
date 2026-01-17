@@ -48,7 +48,7 @@ jobs:
         uses: lfreleng-actions/tag-validate-action@v1
         with:
           require_type: semver
-          require_signed: true
+          require_signed: gpg
 ```
 
 ### Check Remote Repository Tag
@@ -76,16 +76,19 @@ jobs:
 
 <!-- markdownlint-disable MD013 -->
 
-| Name              | Required | Default    | Description                                                            |
-| ----------------- | -------- | ---------- | ---------------------------------------------------------------------- |
-| tag_location      | False    | ''         | Path to tag: remote (ORG/REPO/TAG) or local (PATH/TO/REPO/TAG)         |
-| tag_string        | False    | ''         | Tag string to check (version format, signature check skipped)          |
-| require_type      | False    | none       | Required tag type: `semver`, `calver`, or `none`                       |
-| require_signed    | False    | ambivalent | Signature rule: `true`, `ssh`, `gpg`, `false`, or `ambivalent`         |
-| permit_missing    | False    | false      | Allow missing tags without error                                       |
-| token             | False    | ''         | GitHub token for authenticated API calls and private repository access |
-| github_server_url | False    | ''         | GitHub server URL (for GitHub Enterprise Server)                       |
-| debug             | False    | false      | Enable debug output including git error messages                       |
+| Name               | Required | Default | Description                                                             |
+| ------------------ | -------- | ------- | ----------------------------------------------------------------------- |
+| tag_location       | False    | ''      | Path to tag: remote (ORG/REPO/TAG) or local (PATH/TO/REPO/TAG)          |
+| tag_string         | False    | ''      | Tag string to check (version format, signature check skipped)           |
+| require_type       | False    | ''      | Required tag type: `semver`, `calver`, `both`, `none` (comma-separated) |
+| require_signed     | False    | ''      | Signature type: `gpg`, `ssh`, `gpg-unverifiable`, `unsigned`            |
+| require_github     | False    | false   | Requires that signing key is registered to a GitHub account             |
+| require_owner      | False    | ''      | GitHub username(s)/email(s) that must own signing key                   |
+| reject_development | False    | false   | Reject development/pre-release tags (alpha, beta, rc, dev, etc.)        |
+| permit_missing     | False    | false   | Allow missing tags without error                                        |
+| token              | False    | ''      | GitHub token for authenticated API calls and private repo access        |
+| github_server_url  | False    | ''      | GitHub server URL (for GitHub Enterprise Server)                        |
+| debug              | False    | false   | Enable debug output including git error messages                        |
 
 <!-- markdownlint-enable MD013 -->
 
@@ -125,26 +128,193 @@ is **not** performed in this mode.
 
 #### `require_type`
 
-Enforces the versioning scheme the tag must follow.
+Enforces the versioning scheme the tag must follow. Accepts comma-separated values.
 
-- `semver` - Tag must match Semantic Versioning format
-- `calver` - Tag must match Calendar Versioning format
-- `none` - Any format accepted (default)
+Version type is **always detected and reported** in outputs, regardless of this
+setting. This has negligible performance impact (regex matching, no external
+calls).
+
+🎯 **Version Types**
+
+| Type     | Meaning             | Example           |
+| -------- | ------------------- | ----------------- |
+| `semver` | Semantic Versioning | `v1.2.3`          |
+| `calver` | Calendar Versioning | `2024.01.15`      |
+| `both`   | Valid as both       | `2024.1.0`        |
+| `other`  | Custom format       | `release-2024-q1` |
+
+**Examples:**
+
+- `require_type: semver` - Requires SemVer
+- `require_type: semver,calver` - Accepts either SemVer or CalVer
+- `require_type: both` - Requires tags valid as both SemVer and CalVer
+- `require_type: none` or omit - Accepts any format (semver, calver, or custom)
+
+**Important:** When omitted, custom tag formats (type: `other`) are accepted.
+This enables signature validation for repositories using custom tagging
+schemes.
 
 **Note:** Input is case-insensitive.
 
 #### `require_signed`
 
-Controls cryptographic signature requirements.
+Controls cryptographic signature types. Accepts comma-separated values.
 
-- `ambivalent` - No enforcement, signature type reported as output (default)
-- `true` - Tag must have a signature (SSH or GPG)
-- `ssh` - Tag must be SSH-signed specifically
-- `gpg` - Tag must be GPG-signed specifically
-- `false` - Tag must have no signature
+🔐 **Signature Types**
+
+<!-- markdownlint-disable MD013 -->
+
+| Type               | Meaning                                | Example Use Case      |
+| ------------------ | -------------------------------------- | --------------------- |
+| `gpg`              | GPG-signed with verifiable signature   | Production releases   |
+| `ssh`              | SSH-signed with verifiable signature   | Development workflows |
+| `gpg-unverifiable` | GPG-signed (verification not required) | Legacy signatures     |
+| `unsigned`         | Must have no signature                 | Lightweight tags      |
+| `lightweight`      | Lightweight tag (output)               | Auto-generated tags   |
+| `invalid`          | Invalid signature (output)             | Failed verification   |
+
+<!-- markdownlint-enable MD013 -->
+
+**Examples:**
+
+- `require_signed: gpg` - Requires verified GPG signature
+- `require_signed: gpg,ssh` - Accepts either verified GPG or SSH signature
+- `require_signed: unsigned` - Requires no signature
 
 **Note:** Input is case-insensitive. The action skips signature checking when
 using `tag_string` mode.
+
+#### `require_github`
+
+When set to `true`, requires that the signing key is registered to a GitHub account.
+This verifies that the key used to sign the tag is associated with any GitHub user.
+
+**Requires:** A GitHub token must be provided via the `token` input.
+
+**Example:**
+
+```yaml
+- uses: lfreleng-actions/tag-validate-action@v1
+  with:
+    require_signed: gpg
+    require_github: true
+    token: ${{ secrets.GITHUB_TOKEN }}
+```
+
+**GitHub Username Auto-Detection:**
+
+When `require_github` is enabled but no specific username is provided via
+`require_owner`, the action will attempt to automatically detect the GitHub
+username from the tagger's email address found in the tag signature. If
+successful, the username will be displayed with an `[enumerated]` indicator in
+the output to show auto-detection rather than explicit specification.
+
+**Note:** Use in combination with `require_owner` to verify the key belongs to
+specific GitHub user(s).
+
+#### `require_owner`
+
+Specifies one or more GitHub usernames or email addresses that must own the
+signing key.
+Accepts comma or space-separated values.
+
+When specified, the action verifies that the key used to sign the tag is
+registered to
+one of the provided GitHub accounts or email addresses.
+
+**Requires:** A GitHub token must be provided via the `token` input.
+
+**Examples:**
+
+```yaml
+# Single owner by username
+- uses: lfreleng-actions/tag-validate-action@v1
+  with:
+    require_signed: gpg
+    require_owner: octocat
+    token: ${{ secrets.GITHUB_TOKEN }}
+```
+
+```yaml
+# Two owners (comma-separated)
+- uses: lfreleng-actions/tag-validate-action@v1
+  with:
+    require_signed: gpg
+    require_owner: octocat,monalisa
+    token: ${{ secrets.GITHUB_TOKEN }}
+```
+
+```yaml
+# Email addresses
+- uses: lfreleng-actions/tag-validate-action@v1
+  with:
+    require_signed: gpg
+    require_owner: octocat@github.com,monalisa@example.com
+    token: ${{ secrets.GITHUB_TOKEN }}
+```
+
+```yaml
+# Mixed usernames and emails
+- uses: lfreleng-actions/tag-validate-action@v1
+  with:
+    require_signed: gpg
+    require_owner: octocat,monalisa@example.com
+    token: ${{ secrets.GITHUB_TOKEN }}
+```
+
+**Note:** When `require_owner` is specified, `require_github` is implied and
+does not need to be set separately.
+
+#### `reject_development`
+
+When set to `true`, the action will reject tags identified as development or
+pre-release versions.
+
+Development tags are identified by the presence of keywords in the tag name:
+
+- `alpha`, `beta`, `rc` (release candidate)
+- `dev`, `pre`, `preview`
+- `snapshot`, `nightly`, `canary`
+
+**Use cases:**
+
+- Prevent accidental releases from development tags
+- Enforce production deployments
+- Skip CD pipelines for pre-release versions
+
+**Examples:**
+
+```yaml
+# Reject development tags in production deployment
+- name: "Check production tag"
+  uses: lfreleng-actions/tag-validate-action@v1
+  with:
+    require_type: semver
+    reject_development: true
+```
+
+```yaml
+# Allow development tags (default behavior)
+- name: "Check any tag"
+  uses: lfreleng-actions/tag-validate-action@v1
+  with:
+    require_type: semver
+    reject_development: false  # or omit this line
+```
+
+**Development tag examples that will be rejected:**
+
+- `v1.0.0-alpha`
+- `v2.1.0-beta.1`
+- `v3.0.0-rc1`
+- `2024.01.15-dev`
+- `v1.2.3-snapshot`
+
+**Production tag examples that will pass:**
+
+- `v1.0.0`
+- `v2.1.0`
+- `2024.01.15`
 
 #### `permit_missing`
 
@@ -204,14 +374,18 @@ GitHub server URL for git operations. Supports GitHub Enterprise Server.
 
 #### `debug`
 
-Enable debug output in action logs for troubleshooting.
+Enable comprehensive debug output in action logs for troubleshooting.
 
 When enabled, the action will output:
 
+- **Bash command tracing**: Shows all shell commands being executed (`set -x`)
+- **Python verbose logging**: Enables DEBUG level logging from the Python CLI (`--verbose`)
 - Internal variable values
 - Git command outputs and error messages
 - Tag object inspection details
 - Signature verification details
+- API calls and responses
+- Repository cloning and tag fetching operations
 
 **Use case:** Diagnosing validation failures or unexpected behavior.
 
@@ -231,13 +405,71 @@ When enabled, the action will output:
 | Name            | Description                                                                                    |
 | --------------- | ---------------------------------------------------------------------------------------------- |
 | valid           | Set to `true` if tag passes all validation checks                                              |
-| tag_type        | Detected tag type: `semver`, `calver`, `both`, or `unknown`                                    |
+| tag_type        | Detected tag type: `semver`, `calver`, `both`, or `other`                                      |
 | signing_type    | Signing method used: `unsigned`, `ssh`, `gpg`, `gpg-unverifiable`, `lightweight`, or `invalid` |
 | development_tag | Set to `true` if tag contains pre-release/development strings                                  |
 | version_prefix  | Set to `true` if tag has leading v/V character                                                 |
 | tag_name        | The tag name under inspection                                                                  |
 
 <!-- markdownlint-enable MD013 -->
+
+## Exit Codes
+
+When using the Python CLI (`tag-validate`), the following exit codes are returned:
+
+<!-- markdownlint-disable MD013 -->
+
+| Exit Code | Name                   | Description                                                             |
+| --------- | ---------------------- | ----------------------------------------------------------------------- |
+| 0         | EXIT_SUCCESS           | Validation passed                                                       |
+| 1         | EXIT_VALIDATION_FAILED | Validation failed (type mismatch, signature requirements not met, etc.) |
+| 2         | EXIT_MISSING_TOKEN     | GitHub token required but not provided (when using `--require-github`)  |
+| 3         | EXIT_INVALID_INPUT     | Invalid input parameters or malformed arguments                         |
+| 4         | EXIT_UNEXPECTED_ERROR  | Unexpected error during execution                                       |
+
+<!-- markdownlint-enable MD013 -->
+
+**Notes:**
+
+- Exit code `2` (EXIT_MISSING_TOKEN) is specifically returned when:
+  - `--require-github` flag is used but `GITHUB_TOKEN` environment variable is
+    not set
+  - GitHub API access is required but no authentication token is available
+
+- Exit code `1` (EXIT_VALIDATION_FAILED) covers all validation failures
+  including:
+  - Version type mismatch (e.g., CalVer tag when SemVer required)
+  - Signature requirements not met
+  - Signing key not registered on GitHub (when `--require-github` is used)
+  - Missing username for GitHub key verification
+
+**Example handling exit codes in CI:**
+
+```bash
+#!/bin/bash
+
+tag-validate verify v1.2.3 --require-github --owner myuser
+exit_code=$?
+
+case $exit_code in
+  0)
+    echo "✅ Validation passed"
+    ;;
+  1)
+    echo "❌ Validation failed"
+    exit 1
+    ;;
+  2)
+    echo "❌ GitHub token not provided"
+    echo "Set GITHUB_TOKEN environment variable"
+    exit 1
+    ;;
+  *)
+    echo "❌ Unexpected error (exit code: $exit_code)"
+    exit 1
+    ;;
+esac
+```
 
 ## Tag Detection Priority
 
@@ -286,7 +518,7 @@ jobs:
   uses: lfreleng-actions/tag-validate-action@v1
   with:
     require_type: calver
-    require_signed: true
+    require_signed: gpg,ssh
 ```
 
 ### Check Remote Tag Before Release
@@ -449,7 +681,7 @@ Notes:
 - The "Git Verify Result" column shows internal `git verify-tag` exit codes for reference - `signing_type` is the actual output exposed by the action.
 - **ERRSIG vs BADSIG distinction**: ERRSIG (missing key) returns `gpg-unverifiable` to allow consumers to make informed security decisions; BADSIG (failed verification) returns `invalid`.
 - A `lightweight` tag is functionally treated as an unsigned tag for policy enforcement, but surfaced distinctly for clarity.
-- `invalid` signature states cause failure when `require_signed` is `true`, `gpg`, or `ssh`.
+- `invalid` signature states cause failure when `require_signed` is `gpg` or `ssh`.
 
 ### GitHub API Response Handling
 
@@ -552,10 +784,9 @@ For remote tag validation, the action can use authenticated or anonymous API cal
 
 ### Security Note: Unverifiable Signatures
 
-**Important:** When `require_signed=true` or `require_signed=gpg`, tags with
-`gpg-unverifiable` signatures will **fail** validation. This is a security
-feature to prevent tags signed with unknown or untrusted keys from bypassing
-signature requirements.
+**Important:** When `require_signed=gpg`, tags with `gpg-unverifiable`
+signatures will **fail** validation. This is a security feature to prevent
+tags signed with unknown or untrusted keys from bypassing signature requirements.
 
 **Why this matters:**
 
@@ -565,7 +796,8 @@ signature requirements.
 
 **If you need to allow unverifiable signatures:**
 
-- Use `require_signed=ambivalent` (accepts any signature state)
+- Omit `require_signed` (accepts any signature state)
+- Use `require_signed=gpg-unverifiable` (accepts unverifiable GPG signatures)
 - Or import the GPG key into your keyring for verification
 
 **Example workflow with key import:**

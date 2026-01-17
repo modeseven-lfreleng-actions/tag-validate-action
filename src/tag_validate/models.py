@@ -90,6 +90,9 @@ class KeyVerificationResult(BaseModel):
         False, description="Whether the key is registered on GitHub"
     )
     username: str = Field(..., description="GitHub username checked")
+    enumerated: bool = Field(
+        False, description="Whether the username was auto-detected from email"
+    )
     key_info: Optional[GPGKeyInfo | SSHKeyInfo] = Field(
         None, description="Full key information from GitHub API if found"
     )
@@ -101,8 +104,8 @@ class VersionInfo(BaseModel):
     raw: str = Field(..., description="Original version string")
     normalized: Optional[str] = Field(None, description="Normalized version string (without prefix)")
     is_valid: bool = Field(False, description="Whether version is valid")
-    version_type: Literal["semver", "calver", "unknown"] = Field(
-        "unknown", description="Type of version format detected"
+    version_type: Literal["semver", "calver", "both", "other"] = Field(
+        "other", description="Type of version format detected"
     )
     has_prefix: bool = Field(False, description="Whether version has 'v' or 'V' prefix")
     is_development: bool = Field(
@@ -138,9 +141,10 @@ class ValidationConfig(BaseModel):
     # Signature requirements
     require_signed: bool = Field(False, description="Require tag to be signed")
     require_unsigned: bool = Field(False, description="Require tag to be unsigned")
+    allowed_signature_types: Optional[list[str]] = Field(None, description="Specific signature types allowed (gpg, ssh, gpg-unverifiable, unsigned)")
 
     # GitHub verification
-    verify_github_key: bool = Field(False, description="Verify signing key on GitHub")
+    require_github: bool = Field(False, description="Verify signing key on GitHub")
 
     # Version filtering
     reject_development: bool = Field(False, description="Reject development versions")

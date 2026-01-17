@@ -27,6 +27,13 @@ from .signature import SignatureDetector, SignatureDetectionError
 from .validation import TagValidator
 from .workflow import ValidationWorkflow
 
+# Exit codes
+EXIT_SUCCESS = 0
+EXIT_VALIDATION_FAILED = 1
+EXIT_MISSING_TOKEN = 2
+EXIT_INVALID_INPUT = 3
+EXIT_UNEXPECTED_ERROR = 4
+
 
 class CustomTyper(typer.Typer):
     """Custom Typer class that shows version in help."""
@@ -45,6 +52,134 @@ app = CustomTyper(
     help="Validate Git tags with signature verification and GitHub key checking",
     add_completion=False,
 )
+
+
+def _process_global_options():
+    """Process global options like --verbose and --debug from command line args."""
+    import sys
+    verbose = False
+    debug = False
+
+    # Check for global options and remove them from sys.argv
+    new_argv = []
+    i = 0
+    while i < len(sys.argv):
+        arg = sys.argv[i]
+        if arg in ['--verbose', '-V']:
+            verbose = True
+        elif arg == '--debug':
+            debug = True
+        else:
+            new_argv.append(arg)
+        i += 1
+
+    # Update sys.argv
+    sys.argv[:] = new_argv
+
+    return verbose, debug
+
+
+def _normalize_ssh_fingerprint(key_id: str) -> str:
+    """Normalize SSH key fingerprint by removing algorithm prefix and validate format.
+
+    Args:
+        key_id: SSH key fingerprint that may have algorithm prefix
+
+    Returns:
+        Normalized fingerprint (SHA256:... or original if not SSH)
+
+    Raises:
+        ValueError: If fingerprint format is invalid
+    """
+    import re
+    import base64
+
+    # Remove common SSH algorithm prefixes
+    key_lower = key_id.lower()
+    normalized = key_id
+
+    if "sha256:" in key_lower:
+        # Extract just the SHA256: part
+        sha_index = key_lower.find("sha256:")
+        normalized = key_id[sha_index:]
+
+        # Validate SHA256 format: SHA256:base64_string
+        sha256_pattern = r'^SHA256:([A-Za-z0-9+/]{43}=?|[A-Za-z0-9+/]{44})$'
+        if not re.match(sha256_pattern, normalized, re.IGNORECASE):
+            # Check if it's just empty hash
+            if normalized.upper() == "SHA256:":
+                raise ValueError("SHA256 fingerprint cannot be empty")
+            # Check if it contains invalid Base64 characters
+            hash_part = normalized[7:]  # Remove "SHA256:" prefix
+            if not hash_part:
+                raise ValueError("SHA256 fingerprint cannot be empty")
+            try:
+                # Validate Base64 format (SHA256 hash should be 32 bytes = 43-44 chars in base64)
+                decoded = base64.b64decode(hash_part + '==', validate=True)  # Add padding for validation
+                if len(decoded) != 32:
+                    raise ValueError(f"SHA256 fingerprint has invalid length: expected 32 bytes, got {len(decoded)}")
+            except Exception:
+                raise ValueError(f"SHA256 fingerprint contains invalid Base64 characters: {hash_part}")
+
+    elif "md5:" in key_lower:
+        # Extract just the MD5: part
+        md5_index = key_lower.find("md5:")
+        normalized = key_id[md5_index:]
+
+        # Validate MD5 format: MD5:xx:xx:xx:xx:xx:xx:xx:xx:xx:xx:xx:xx:xx:xx:xx:xx
+        md5_pattern = r'^MD5:([0-9a-fA-F]{2}:){15}[0-9a-fA-F]{2}$'
+        if not re.match(md5_pattern, normalized, re.IGNORECASE):
+            # Check if it's just empty hash
+            if normalized.upper() == "MD5:":
+                raise ValueError("MD5 fingerprint cannot be empty")
+            # More detailed validation
+            hash_part = normalized[4:]  # Remove "MD5:" prefix
+            if not hash_part:
+                raise ValueError("MD5 fingerprint cannot be empty")
+            # Should be exactly 47 characters: 16 hex pairs separated by colons
+            if len(hash_part) != 47:
+                raise ValueError(f"MD5 fingerprint has invalid length: expected 47 characters, got {len(hash_part)}")
+            # Check format with colons
+            hex_parts = hash_part.split(':')
+            if len(hex_parts) != 16:
+                raise ValueError(f"MD5 fingerprint should have 16 hex pairs separated by colons, got {len(hex_parts)}")
+            # Validate each hex pair
+            for i, part in enumerate(hex_parts):
+                if len(part) != 2:
+                    raise ValueError(f"MD5 fingerprint hex pair {i+1} has invalid length: expected 2 characters, got {len(part)}")
+                if not re.match(r'^[0-9a-fA-F]{2}$', part):
+                    raise ValueError(f"MD5 fingerprint contains invalid hex characters in pair {i+1}: {part}")
+
+    return normalized
+
+
+async def _resolve_owner_to_username(owner: str, github_token: Optional[str] = None) -> str:
+    """Resolve owner (email or username) to GitHub username.
+
+    Args:
+        owner: GitHub username or email address
+        github_token: GitHub API token for email lookup
+
+    Returns:
+        GitHub username
+
+    Raises:
+        ValueError: If email lookup fails or no token provided for email
+    """
+    # If it contains @, treat as email and lookup username
+    if "@" in owner:
+        if not github_token:
+            raise ValueError("GitHub token is required for email-to-username lookup. Set GITHUB_TOKEN environment variable or pass --token")
+
+        from .github_keys import GitHubKeysClient
+        async with GitHubKeysClient(token=github_token) as client:
+            username = await client.lookup_username_by_email(owner)
+            if not username:
+                raise ValueError(f"Could not find GitHub username for email: {owner}")
+            return username
+    else:
+        # Already a username
+        return owner
 
 # Initialize Rich console (will be reconfigured for JSON output if needed)
 console = Console()
@@ -67,15 +202,124 @@ TAG_LOCATION_FORMAT_EXAMPLES = [
 
 # Configure logging (will be suppressed for JSON output)
 logging.basicConfig(
-    level=logging.INFO,
+    level=logging.WARNING,
     format="%(message)s",
     datefmt="[%X]",
     handlers=[RichHandler(console=console, rich_tracebacks=True)],
 )
 logger = logging.getLogger("tag_validate")
 
+# Process global options after logger is defined
+verbose, debug = _process_global_options()
+if verbose or debug:
+    logging.getLogger().setLevel(logging.DEBUG)
+    logger.setLevel(logging.DEBUG)
+
 # Suppress verbose HTTP logs from httpx (used by dependamerge)
 logging.getLogger("httpx").setLevel(logging.WARNING)
+
+
+def parse_multi_value_option(value: Optional[str]) -> list[str]:
+    """Parse comma or space-separated values from an option.
+
+    Args:
+        value: Option value string (e.g., "gpg,ssh" or "gpg ssh")
+
+    Returns:
+        List of parsed values (lowercased and stripped)
+
+    Examples:
+        >>> parse_multi_value_option("gpg,ssh")
+        ['gpg', 'ssh']
+        >>> parse_multi_value_option("gpg ssh")
+        ['gpg', 'ssh']
+        >>> parse_multi_value_option(None)
+        []
+    """
+    if not value:
+        return []
+
+    # Parse comma or space-separated values
+    if ',' in value:
+        values = [v.strip().lower() for v in value.split(',') if v.strip()]
+    else:
+        values = [v.lower() for v in value.split() if v]
+
+    return values
+
+
+def validate_version_types(type_list: list[str]) -> None:
+    """Validate version type names.
+
+    Args:
+        type_list: List of version type names
+
+    Raises:
+        typer.Exit: If invalid types are found
+    """
+    valid_types = {'semver', 'calver', 'both', 'none'}
+    invalid_types = set(type_list) - valid_types
+
+    if invalid_types:
+        console.print(f"[red]Invalid version type(s): {', '.join(invalid_types)}[/red]")
+        console.print("Valid types: semver, calver, both, none")
+        raise typer.Exit(EXIT_INVALID_INPUT)
+
+
+def validate_signature_types(sig_list: list[str]) -> None:
+    """Validate signature type names and combinations.
+
+    Args:
+        sig_list: List of signature type names
+
+    Raises:
+        typer.Exit: If invalid types or combinations are found
+    """
+    valid_signature_types = {'gpg', 'ssh', 'gpg-unverifiable', 'unsigned'}
+    invalid_types = set(sig_list) - valid_signature_types
+
+    if invalid_types:
+        console.print(f"[red]Invalid signature type(s): {', '.join(invalid_types)}[/red]")
+        console.print("Valid types: gpg, ssh, gpg-unverifiable, unsigned")
+        raise typer.Exit(EXIT_INVALID_INPUT)
+
+    # Check for invalid combinations
+    if 'unsigned' in sig_list and len(sig_list) > 1:
+        console.print("[red]Cannot combine 'unsigned' with other signature types[/red]")
+        raise typer.Exit(EXIT_INVALID_INPUT)
+
+
+def check_version_type_match(version_type: str, required_types: list[str]) -> bool:
+    """Check if version type matches required types.
+
+    Handles "both" type which satisfies any semver or calver requirement.
+    Handles "none" requirement which accepts any type.
+    Handles "both" in requirements which accepts semver OR calver.
+
+    Args:
+        version_type: Detected version type (semver, calver, both, other)
+        required_types: List of required types
+
+    Returns:
+        True if version type matches requirements
+    """
+    if not required_types:
+        return True
+
+    # "none" in requirements means accept any type
+    if "none" in required_types:
+        return True
+
+    # "both" detected type satisfies any semver or calver requirement
+    if version_type == "both":
+        return True
+
+    # "both" in requirements means accept semver OR calver (or both)
+    if "both" in required_types and version_type in ("semver", "calver", "both"):
+        return True
+
+    # Single type must be in the required list
+    return version_type in required_types
 
 
 def _suppress_logging_for_json():
@@ -120,6 +364,10 @@ def _detect_key_type(key_id: str) -> str:
     if key_lower.startswith("sha256:") or key_lower.startswith("md5:"):
         return "ssh"
 
+    # Check for SSH fingerprint with algorithm prefix (ECDSA:SHA256:, RSA:SHA256:, etc.)
+    if "sha256:" in key_lower or "md5:" in key_lower:
+        return "ssh"
+
     # GPG key patterns - typically hex strings
     # Remove spaces and check if it's a valid hex string
     key_clean = key_id.replace(" ", "").replace(":", "")
@@ -156,6 +404,11 @@ def main(
         "-V",
         help="Enable verbose logging",
     ),
+    debug: bool = typer.Option(
+        False,
+        "--debug",
+        hidden=True,
+    ),
     quiet: bool = typer.Option(
         False,
         "--quiet",
@@ -173,15 +426,17 @@ def main(
         _suppress_logging_for_json()
         return
 
-    if verbose:
+    if verbose or debug:
+        logging.getLogger().setLevel(logging.DEBUG)
         logger.setLevel(logging.DEBUG)
     elif quiet:
+        logging.getLogger().setLevel(logging.ERROR)
         logger.setLevel(logging.ERROR)
 
 
 
 
-@app.command()
+@app.command(name="github")
 def verify_github(
     key_id: str = typer.Argument(
         ...,
@@ -191,7 +446,7 @@ def verify_github(
         ...,
         "--owner",
         "-o",
-        help="GitHub username to verify key against",
+        help="GitHub username or email address to verify key against",
     ),
     key_type: str = typer.Option(
         "auto",
@@ -216,6 +471,13 @@ def verify_github(
         "--no-subkeys",
         help="Disable GPG subkey verification (only check primary keys)",
     ),
+    test_mode: bool = typer.Option(
+        False,
+        "--test-mode",
+        help="Test key parsing and normalization without making GitHub API calls",
+        hidden=True,
+    ),
+
 ):
     """
     Verify if a specific GPG key ID or SSH fingerprint is registered on GitHub.
@@ -227,15 +489,99 @@ def verify_github(
     with --type if needed.
 
     Examples:
-        # Auto-detect key type (GPG)
-        tag-validate verify-key FCE8AAABF53080F6 --owner torvalds --token $GITHUB_TOKEN
+        # Auto-detect key type (GPG) with username
+        tag-validate github FCE8AAABF53080F6 --owner torvalds --token $GITHUB_TOKEN
 
-        # Auto-detect key type (SSH)
-        tag-validate verify-key "ssh-ed25519 AAAAC3NzaC1..." --owner torvalds --token $GITHUB_TOKEN
+        # Auto-detect key type (SSH) with email address
+        tag-validate github "ssh-ed25519 AAAAC3NzaC1..." --owner user@example.com --token $GITHUB_TOKEN
 
-        # Explicitly specify type
-        tag-validate verify-key FCE8AAABF53080F6 --owner torvalds --type gpg --token $GITHUB_TOKEN
+        # Explicitly specify type with username
+        tag-validate github FCE8AAABF53080F6 --owner torvalds --type gpg --token $GITHUB_TOKEN
     """
+
+    # Handle test mode first, before any other validations
+    if test_mode:
+        async def _test_mode():
+            # Suppress ALL logs when JSON output is requested
+            if json_output:
+                _suppress_logging_for_json()
+
+            # Auto-detect or validate key type
+            detected_type = key_type
+            if key_type == "auto":
+                detected_type = _detect_key_type(key_id)
+                if detected_type == "unknown":
+                    error_msg = f"Could not auto-detect key type from: {key_id[:50]}... Please specify --type gpg or --type ssh"
+                    if json_output:
+                        console.print_json(data={"success": False, "error": error_msg})
+                    else:
+                        console.print(f"[red]❌ {error_msg}[/red]")
+                    raise typer.Exit(1)
+            elif key_type not in ["gpg", "ssh"]:
+                error_msg = f"Invalid key type: {key_type}. Must be 'gpg', 'ssh', or 'auto'"
+                if json_output:
+                    console.print_json(data={"success": False, "error": error_msg})
+                else:
+                    console.print(f"[red]❌ {error_msg}[/red]")
+                raise typer.Exit(1)
+
+            try:
+                if detected_type == "ssh":
+                    normalized_fingerprint = _normalize_ssh_fingerprint(key_id)
+                    if json_output:
+                        console.print_json(data={
+                            "test_mode": True,
+                            "success": True,
+                            "key_type": detected_type,
+                            "original_input": key_id,
+                            "normalized_fingerprint": normalized_fingerprint,
+                            "owner": owner,
+                        })
+                    else:
+                        console.print(f"\n[green]✅ Test Mode: Key parsing successful[/green]")
+                        console.print(f"[bold]Key Type:[/bold] {detected_type}" + (" (auto-detected)" if key_type == "auto" else ""))
+                        console.print(f"[bold]Original Input:[/bold] {key_id}")
+                        console.print(f"[bold]Normalized Fingerprint:[/bold] {normalized_fingerprint}")
+                        console.print(f"[bold]Owner:[/bold] {owner}")
+                        console.print(f"\n[dim]No GitHub API calls made in test mode.[/dim]")
+                else:  # gpg
+                    if json_output:
+                        console.print_json(data={
+                            "test_mode": True,
+                            "success": True,
+                            "key_type": detected_type,
+                            "original_input": key_id,
+                            "normalized_key_id": key_id,
+                            "owner": owner,
+                        })
+                    else:
+                        console.print(f"\n[green]✅ Test Mode: Key parsing successful[/green]")
+                        console.print(f"[bold]Key Type:[/bold] {detected_type}" + (" (auto-detected)" if key_type == "auto" else ""))
+                        console.print(f"[bold]Original Input:[/bold] {key_id}")
+                        console.print(f"[bold]Normalized Key ID:[/bold] {key_id}")
+                        console.print(f"[bold]Owner:[/bold] {owner}")
+                        console.print(f"\n[dim]No GitHub API calls made in test mode.[/dim]")
+
+                import sys
+                sys.exit(EXIT_SUCCESS)
+            except Exception as e:
+                error_msg = f"Key parsing/normalization failed: {str(e)}"
+                if json_output:
+                    console.print_json(data={
+                        "test_mode": True,
+                        "success": False,
+                        "error": error_msg,
+                        "key_type": detected_type,
+                        "original_input": key_id,
+                    })
+                else:
+                    console.print(f"\n[red]❌ Test Mode: {error_msg}[/red]")
+                raise typer.Exit(1)
+
+        # Run test mode and return
+        asyncio.run(_test_mode())
+        return
+
     async def _verify():
         try:
             # Suppress ALL logs when JSON output is requested
@@ -266,43 +612,53 @@ def verify_github(
             if not github_token and not os.getenv("GITHUB_TOKEN"):
                 error_msg = "GitHub token is required. Use --token option or set GITHUB_TOKEN environment variable."
                 if json_output:
-                    console.print_json(data={"success": False, "error": error_msg})
+                    console.print_json(data={"success": False, "error": error_msg, "exit_code": EXIT_MISSING_TOKEN})
                 else:
                     console.print(f"\n[red]❌ {error_msg}[/red]")
-                raise typer.Exit(1)
+                raise typer.Exit(EXIT_MISSING_TOKEN)
 
-            if not json_output:
-                console.print(f"\n[bold]Key ID/Fingerprint:[/bold] {key_id}")
-                console.print(f"[bold]Key Type:[/bold] {detected_type}" + (" (auto-detected)" if key_type == "auto" else ""))
-                console.print(f"[bold]GitHub User:[/bold] @{owner}")
+            # Resolve owner (email or username) to username first
+            try:
+                resolved_owner = await _resolve_owner_to_username(owner, github_token)
+            except ValueError as e:
+                if json_output:
+                    console.print_json(data={"success": False, "error": str(e), "exit_code": EXIT_INVALID_INPUT})
+                else:
+                    console.print(f"\n[red]❌ Error:[/red] {e}")
+                raise typer.Exit(EXIT_INVALID_INPUT)
+
+
+
 
             # Verify key on GitHub
             if json_output:
                 async with GitHubKeysClient(token=github_token) as client:
                     if detected_type == "gpg":
                         verification = await client.verify_gpg_key_registered(
-                            username=owner,
+                            username=resolved_owner,
                             key_id=key_id,
                             check_subkeys=not no_subkeys,
                         )
                     else:  # ssh
+                        normalized_fingerprint = _normalize_ssh_fingerprint(key_id)
                         verification = await client.verify_ssh_key_registered(
-                            username=owner,
-                            public_key_fingerprint=key_id,
+                            username=resolved_owner,
+                            public_key_fingerprint=normalized_fingerprint,
                         )
             else:
                 with console.status("[bold green]Verifying key on GitHub..."):
                     async with GitHubKeysClient(token=github_token) as client:
                         if detected_type == "gpg":
                             verification = await client.verify_gpg_key_registered(
-                                username=owner,
+                                username=resolved_owner,
                                 key_id=key_id,
                                 check_subkeys=not no_subkeys,
                             )
                         else:  # ssh
+                            normalized_fingerprint = _normalize_ssh_fingerprint(key_id)
                             verification = await client.verify_ssh_key_registered(
-                                username=owner,
-                                public_key_fingerprint=key_id,
+                                username=resolved_owner,
+                                public_key_fingerprint=normalized_fingerprint,
                             )
 
             # Display results
@@ -311,7 +667,7 @@ def verify_github(
                     "success": verification.key_registered,
                     "key_type": detected_type,
                     "key_id": key_id,
-                    "github_user": owner,
+                    "github_user": resolved_owner,
                     "is_registered": verification.key_registered,
                 }
                 console.print_json(data=result)
@@ -326,26 +682,28 @@ def verify_github(
                     signer_email=None,
                     signature_data=None,
                 )
-                _display_verification_result(verification, mock_signature, owner)
+                _display_verification_result(verification, mock_signature, resolved_owner)
 
             # Exit with appropriate code
             if verification.key_registered:
-                raise typer.Exit(0)
+                raise typer.Exit(EXIT_SUCCESS)
             else:
-                raise typer.Exit(1)
+                raise typer.Exit(EXIT_VALIDATION_FAILED)
 
         except typer.Exit:
             raise
+        except SystemExit:
+            raise
         except Exception as e:
             if json_output:
-                console.print_json(data={"success": False, "error": str(e)})
+                console.print_json(data={"success": False, "error": str(e), "exit_code": EXIT_UNEXPECTED_ERROR})
             else:
                 console.print(f"\n[red]❌ Error:[/red] {e}")
                 if logger.isEnabledFor(logging.DEBUG):
                     logger.exception("Unexpected error during verification")
                 else:
                     logger.error(f"Unexpected error during verification: {e}")
-            raise typer.Exit(1)
+            raise typer.Exit(EXIT_UNEXPECTED_ERROR)
 
     # Run async function
     asyncio.run(_verify())
@@ -467,8 +825,6 @@ def _display_signature_info(signature_info, tag_name: str):
         table.add_row("Status", "❌ Signature is corrupted or tampered")
     elif signature_info.type in ["unsigned", "lightweight"]:
         table.add_row("Status", "No signature")
-    else:
-        table.add_row("Verified", "✅ Yes" if signature_info.verified else "❌ No")
 
     if signature_info.signer_email:
         table.add_row("Signer", signature_info.signer_email)
@@ -532,7 +888,7 @@ def validate(
         None,
         "--require-type",
         "-t",
-        help="Require specific version type (semver or calver)",
+        help="Require specific version type: semver, calver (comma or space-separated for multiple)",
     ),
     allow_prefix: bool = typer.Option(
         True,
@@ -611,12 +967,12 @@ def validate(
                 result = VersionInfo(
                     raw=version_string,
                     normalized=version_string,
-                    version_type="unknown",
+                    version_type="other",
                     is_valid=True,
                     has_prefix=version_string[0:1] in ("v", "V") if version_string else False,
                     is_development=any(kw in version_string.lower() for kw in
                         ["dev", "pre", "alpha", "beta", "rc", "snapshot", "nightly", "canary", "preview"]),
-                    # SemVer fields (all None for unknown type)
+                    # SemVer fields (all None for other type)
                     major=None,
                     minor=None,
                     patch=None,
@@ -638,23 +994,29 @@ def validate(
                 strict_semver=strict_semver,
             )
 
-        # Check if specific type is required (skip if require_type is "none")
-        if require_type and require_type.lower() != "none" and result.is_valid:
-            if result.version_type != require_type:
+        # Check if specific type is required - multi-value support
+        if require_type and result.is_valid:
+            # Parse and validate types
+            require_type_list = parse_multi_value_option(require_type)
+            validate_version_types(require_type_list)
+
+            # Check if result matches required types
+            if not check_version_type_match(result.version_type, require_type_list):
                 if json_output:
                     output = {
                         "success": False,
-                        "error": f"Version type mismatch: expected {require_type}, got {result.version_type}",
+                        "error": f"Version type mismatch: expected {', '.join(require_type_list)}, got {result.version_type}",
                         "version": version_string,
                         "detected_type": result.version_type,
+                        "required_types": require_type_list,
                     }
                     console.print_json(data=output)
                 else:
                     console.print(
                         f"\n[red]❌ Version type mismatch:[/red] "
-                        f"expected {require_type}, got {result.version_type}"
+                        f"expected {', '.join(require_type_list)}, got {result.version_type}"
                     )
-                raise typer.Exit(1)
+                raise typer.Exit(EXIT_VALIDATION_FAILED)
 
         # Output results
         if json_output:
@@ -664,9 +1026,8 @@ def validate(
                 "normalized": result.normalized,
                 "version_type": result.version_type,
                 "is_valid": result.is_valid,
-                "has_prefix": result.has_prefix,
-                "is_development": result.is_development,  # Keep for backwards compatibility
-                "development_tag": result.is_development,  # New consistent name
+                "development_tag": result.is_development,
+                "version_prefix": result.has_prefix,
             }
 
             # Add type-specific fields
@@ -685,6 +1046,25 @@ def validate(
                     "day": result.day,
                     "micro": result.micro,
                     "modifier": result.modifier,
+                })
+            elif result.version_type == "both":
+                # For 'both' type, include SemVer fields from result and CalVer fields by re-parsing
+                validator = TagValidator()
+                calver_result = validator.validate_calver(result.normalized or result.raw)
+
+                output.update({
+                    # SemVer fields from original result
+                    "major": result.major,
+                    "minor": result.minor,
+                    "patch": result.patch,
+                    "prerelease": result.prerelease,
+                    "build_metadata": result.build_metadata,
+                    # CalVer fields from re-parsing as CalVer
+                    "year": calver_result.year if calver_result.is_valid else None,
+                    "month": calver_result.month if calver_result.is_valid else None,
+                    "day": calver_result.day if calver_result.is_valid else None,
+                    "micro": calver_result.micro if calver_result.is_valid else None,
+                    "modifier": calver_result.modifier if calver_result.is_valid else None,
                 })
 
             if not result.is_valid:
@@ -733,23 +1113,28 @@ def verify(
         None,
         "--require-type",
         "-t",
-        help="Require specific version type (semver or calver)",
+        help="Require specific version type: semver, calver (comma or space-separated for multiple)",
     ),
     require_signed: Optional[str] = typer.Option(
         None,
         "--require-signed",
-        help="Require tag signature. Values: true (any verified), gpg, ssh, gpg-unverifiable, signed (any including unverified), false (must be unsigned), or omit for no requirement",
+        help="Require tag signature. Values: gpg, ssh, gpg-unverifiable, unsigned (comma or space-separated for multiple). Omit for no requirement.",
     ),
-    verify_github_key: bool = typer.Option(
+    require_github: bool = typer.Option(
         False,
-        "--verify-github-key",
+        "--require-github",
         help="Verify signing key is registered on GitHub",
     ),
     owner: Optional[str] = typer.Option(
         None,
         "--owner",
         "-o",
-        help="GitHub username for key verification (optional, auto-detected from tagger email if not provided)",
+        help="GitHub username or email address for key verification (optional, auto-detected from tagger email if not provided)",
+    ),
+    require_owner: Optional[str] = typer.Option(
+        None,
+        "--require-owner",
+        help="GitHub username(s) or email address(es) that must own the signing key (comma or space-separated for multiple). Implies --require-github.",
     ),
     github_token: Optional[str] = typer.Option(
         None,
@@ -794,7 +1179,7 @@ def verify(
     - Remote tag: tag-validate verify-tag owner/repo@v1.2.3
 
     GitHub Username Auto-Detection:
-    When --verify-github-key is used without --owner, the tool will automatically
+    When --require-github is used without --owner, the tool will automatically
     detect the GitHub username from the tagger's email address by searching GitHub's
     commit history. This makes validation easier as you don't need to manually
     specify the owner.
@@ -807,18 +1192,33 @@ def verify(
         tag-validate verify v1.2.3 --require-type semver --require-signed true
 
         # Verify GitHub key (auto-detects owner from tagger email)
-        tag-validate verify v1.2.3 --verify-github-key --token $GITHUB_TOKEN
+        tag-validate verify v1.2.3 --require-github --token $GITHUB_TOKEN
 
-        # Validate remote tag with explicit owner
+        # Validate remote tag with explicit owner (username)
         tag-validate verify torvalds/linux@v6.0 \
-          --verify-github-key --owner torvalds --token $GITHUB_TOKEN
+          --require-github --owner torvalds --token $GITHUB_TOKEN
+
+        # Validate with email address
+        tag-validate verify v1.2.3 --require-github --owner user@example.com --token $GITHUB_TOKEN
+
+        # Require tag signed by specific GitHub user(s)
+        tag-validate verify v1.2.3 --require-owner octocat --token $GITHUB_TOKEN
+
+        # Require tag signed by one of multiple owners
+        tag-validate verify v1.2.3 --require-owner "octocat,monalisa" --token $GITHUB_TOKEN
+
+        # Require tag signed by specific email address(es)
+        tag-validate verify v1.2.3 --require-owner user@example.com --token $GITHUB_TOKEN
+
+        # Mixed usernames and emails
+        tag-validate verify v1.2.3 --require-owner "octocat,user@example.com" --token $GITHUB_TOKEN
 
         # Reject development versions
         tag-validate verify v1.2.3-beta --reject-development
 
         # Only verify signature and GitHub key (skip version validation)
         tag-validate verify my-tag --skip-version-validation \
-          --verify-github-key --owner username --token $GITHUB_TOKEN
+          --require-github --owner user@example.com --token $GITHUB_TOKEN
     """
     async def _verify():
         try:
@@ -847,42 +1247,75 @@ def verify(
                         console.print(f"  • {fmt}")
                 raise typer.Exit(1)
 
-            # Parse require_signed option
-            # Support: true, false, gpg, ssh, gpg-unverifiable, signed, ambivalent, or None
+            # Parse require_signed option - multi-value support
+            # Support: gpg, ssh, gpg-unverifiable, unsigned (comma or space-separated)
             config_require_signed = False
             config_require_unsigned = False
+            allowed_signature_types = None
 
             if require_signed:
-                require_signed_lower = require_signed.lower()
-                if require_signed_lower in ("true", "1", "yes"):
-                    config_require_signed = True
-                elif require_signed_lower == "false":
+                # Parse and validate signature types
+                require_signed_types = parse_multi_value_option(require_signed)
+                validate_signature_types(require_signed_types)
+
+                # Set config flags based on types
+                if 'unsigned' in require_signed_types:
                     config_require_unsigned = True
-                elif require_signed_lower == "ambivalent":
-                    # Don't set either flag - accept any signature state
-                    pass
-                elif require_signed_lower in ("gpg", "ssh", "gpg-unverifiable", "signed"):
-                    # For now, treat these as require_signed=True
-                    # Future enhancement: add specific signature type validation
+                    # If unsigned is mixed with other types, store all types
+                    if len(require_signed_types) > 1:
+                        allowed_signature_types = require_signed_types
+                    else:
+                        allowed_signature_types = None
+                elif require_signed_types:
+                    # Store specific signature types for validation
                     config_require_signed = True
-                else:
-                    console.print(f"[red]Invalid --require-signed value: {require_signed}[/red]")
-                    console.print("Valid values: true, false, gpg, ssh, gpg-unverifiable, signed, ambivalent")
-                    raise typer.Exit(1)
+                    allowed_signature_types = require_signed_types
+
+            # Parse require_type option - multi-value support
+            require_type_list = []
+            if require_type and not skip_version_validation:
+                # Parse and validate types
+                require_type_list = parse_multi_value_option(require_type)
+                validate_version_types(require_type_list)
+                # Filter out 'none' - it means no requirement
+                require_type_list = [t for t in require_type_list if t != 'none']
+
+            # Parse require_owner option - multi-value support
+            require_owner_list = []
+            config_require_github = require_github  # Preserve original parameter value
+            if require_owner:
+                require_owner_list = parse_multi_value_option(require_owner)
+                # When require_owner is specified, require_github is implied
+                config_require_github = True
 
             # Build configuration
             config = ValidationConfig(
-                require_semver=(require_type == "semver") if not skip_version_validation else False,
-                require_calver=(require_type == "calver") if not skip_version_validation else False,
+                require_semver=("semver" in require_type_list or "both" in require_type_list) if require_type_list else False,
+                require_calver=("calver" in require_type_list or "both" in require_type_list) if require_type_list else False,
                 require_signed=config_require_signed,
                 require_unsigned=config_require_unsigned,
-                verify_github_key=verify_github_key,
+                allowed_signature_types=allowed_signature_types if require_signed else None,
+                require_github=config_require_github,
                 reject_development=reject_development if not skip_version_validation else False,
                 skip_version_validation=skip_version_validation,
+                allow_prefix=True,  # Default to allowing version prefixes
+                config_source="CLI",  # Mark as CLI-originated config
             )
 
             # Create workflow
             workflow = ValidationWorkflow(config, repo_path=repo_path)
+
+            # Resolve owner parameter (email or username) to username if provided
+            resolved_owner = None
+            if owner:
+                try:
+                    resolved_owner = await _resolve_owner_to_username(owner, github_token)
+                except ValueError as e:
+                    if json_output:
+                        console.print_json(data={"success": False, "error": str(e), "exit_code": EXIT_INVALID_INPUT})
+                    else:
+                        console.print(f"\n[red]❌ Error:[/red] {e}")
+                    raise typer.Exit(EXIT_INVALID_INPUT)
 
             # Run validation
             # Normalize tag location format (handle owner/repo/tag → owner/repo@tag)
@@ -892,15 +1325,17 @@ def verify(
                 if json_output:
                     result = await workflow.validate_tag_location(
                         tag_location=normalized_location,
-                        github_user=owner,
+                        github_user=resolved_owner,
                         github_token=github_token,
+                        require_owners=require_owner_list if require_owner_list else None,
                     )
                 else:
                     with console.status("[bold green]Validating tag..."):
                         result = await workflow.validate_tag_location(
                             tag_location=normalized_location,
-                            github_user=owner,
+                            github_user=resolved_owner,
                             github_token=github_token,
+                            require_owners=require_owner_list if require_owner_list else None,
                         )
             except Exception as e:
                 # Handle missing tag with permit_missing flag
@@ -909,7 +1344,7 @@ def verify(
                         output = {
                             "success": True,
                             "tag_name": normalized_location,
-                            "version_type": "unknown",
+                            "version_type": "other",
                             "signature_type": "unsigned",
                             "signature_verified": False,
                             "key_registered": None,
@@ -938,7 +1373,7 @@ def verify(
                         output = {
                             "success": True,
                             "tag_name": normalized_location,
-                            "version_type": "unknown",
+                            "version_type": "other",
                             "signature_type": "unsigned",
                             "signature_verified": False,
                             "key_registered": None,
@@ -964,10 +1399,8 @@ def verify(
                     "signature_type": result.signature_info.type if result.signature_info else None,
                     "signature_verified": result.signature_info.verified if result.signature_info else None,
                     "key_registered": result.key_verification.key_registered if result.key_verification else None,
-                    "is_development": result.version_info.is_development if result.version_info else False,  # Keep for backwards compatibility
-                    "development_tag": result.version_info.is_development if result.version_info else False,  # New consistent name
-                    "has_prefix": result.version_info.has_prefix if result.version_info else False,  # Keep for backwards compatibility
-                    "version_prefix": result.version_info.has_prefix if result.version_info else False,  # New consistent name
+                    "development_tag": result.version_info.is_development if result.version_info else False,
+                    "version_prefix": result.version_info.has_prefix if result.version_info else False,
                     "errors": result.errors,
                     "warnings": result.warnings,
                     "info": result.info,
@@ -1008,23 +1441,27 @@ def verify(
 
             # Exit with appropriate code
             if result.is_valid:
-                raise typer.Exit(0)
+                raise typer.Exit(EXIT_SUCCESS)
             else:
-                raise typer.Exit(1)
+                # Check if it's a missing token error
+                if any("token" in msg.lower() for msg in result.errors):
+                    raise typer.Exit(EXIT_MISSING_TOKEN)
+                else:
+                    raise typer.Exit(EXIT_VALIDATION_FAILED)
 
         except typer.Exit:
             # Let typer.Exit pass through without catching
             raise
         except Exception as e:
             if json_output:
-                console.print_json(data={"success": False, "error": str(e)})
+                console.print_json(data={"success": False, "error": str(e), "exit_code": EXIT_UNEXPECTED_ERROR})
             else:
                 console.print(f"\n[red]❌ Unexpected error:[/red] {e}")
                 if logger.isEnabledFor(logging.DEBUG):
                     logger.exception("Unexpected error during tag verification")
                 else:
                     logger.error(f"Unexpected error during tag verification: {e}")
-            raise typer.Exit(1)
+            raise typer.Exit(EXIT_UNEXPECTED_ERROR)
 
     # Run async function
     asyncio.run(_verify())

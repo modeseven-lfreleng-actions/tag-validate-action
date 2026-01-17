@@ -294,6 +294,7 @@ class GitHubKeysClient:
                     return KeyVerificationResult(
                         key_registered=True,
                         username=username,
+                        enumerated=False,
                         key_info=key,
                     )
 
@@ -307,6 +308,7 @@ class GitHubKeysClient:
                             return KeyVerificationResult(
                                 key_registered=True,
                                 username=username,
+                                enumerated=False,
                                 key_info=key,  # Return the primary key info, not the subkey
                             )
 
@@ -315,6 +317,7 @@ class GitHubKeysClient:
             return KeyVerificationResult(
                 key_registered=False,
                 username=username,
+                enumerated=False,
                 key_info=None,
             )
 
@@ -366,6 +369,7 @@ class GitHubKeysClient:
                         return KeyVerificationResult(
                             key_registered=True,
                             username=username,
+                            enumerated=False,
                             key_info=key,
                         )
                 else:
@@ -374,6 +378,7 @@ class GitHubKeysClient:
                         return KeyVerificationResult(
                             key_registered=True,
                             username=username,
+                            enumerated=False,
                             key_info=key,
                         )
 
@@ -382,6 +387,7 @@ class GitHubKeysClient:
             return KeyVerificationResult(
                 key_registered=False,
                 username=username,
+                enumerated=False,
                 key_info=None,
             )
 

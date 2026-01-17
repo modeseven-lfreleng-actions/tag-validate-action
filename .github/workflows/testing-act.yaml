@@ -57,8 +57,8 @@ jobs:
         shell: bash
         run: |
           output=$(tag-validate validate "v2.3.1-beta.1" --json)
-          has_prefix=$(echo "$output" | jq -r '.has_prefix')
-          is_dev=$(echo "$output" | jq -r '.is_development')
+          has_prefix=$(echo "$output" | jq -r '.version_prefix')
+          is_dev=$(echo "$output" | jq -r '.development_tag')
           if [ "$has_prefix" != "true" ] || [ "$is_dev" != "true" ]; then
             echo "Error: Prefix or development tag not detected"
             exit 1
@@ -80,7 +80,7 @@ jobs:
         shell: bash
         run: |
           output=$(tag-validate validate "v2025.1.0-alpha.1" --json)
-          is_dev=$(echo "$output" | jq -r '.is_development')
+          is_dev=$(echo "$output" | jq -r '.development_tag')
           if [ "$is_dev" != "true" ]; then
             echo "Error: Development tag not detected"
             exit 1
@@ -118,7 +118,7 @@ jobs:
         run: |
           output=$(tag-validate validate \
             "1.0.0-alpha.1" --json)
-          is_dev=$(echo "$output" | jq -r '.is_development')
+          is_dev=$(echo "$output" | jq -r '.development_tag')
           if [ "$is_dev" != "true" ]; then
             echo "Error: Alpha not detected as development"
             exit 1
@@ -129,7 +129,7 @@ jobs:
         shell: bash
         run: |
           output=$(tag-validate validate "v2.0.0-beta" --json)
-          is_dev=$(echo "$output" | jq -r '.is_development')
+          is_dev=$(echo "$output" | jq -r '.development_tag')
           if [ "$is_dev" != "true" ]; then
             echo "Error: Beta not detected as development"
             exit 1
@@ -140,7 +140,7 @@ jobs:
         shell: bash
         run: |
           output=$(tag-validate validate "1.0.0-rc.1" --json)
-          is_dev=$(echo "$output" | jq -r '.is_development')
+          is_dev=$(echo "$output" | jq -r '.development_tag')
           if [ "$is_dev" != "true" ]; then
             echo "Error: RC not detected as development"
             exit 1
@@ -151,7 +151,7 @@ jobs:
         shell: bash
         run: |
           output=$(tag-validate validate "1.0.0-dev" --json)
-          is_dev=$(echo "$output" | jq -r '.is_development')
+          is_dev=$(echo "$output" | jq -r '.development_tag')
           if [ "$is_dev" != "true" ]; then
             echo "Error: Dev not detected as development"
             exit 1
@@ -162,7 +162,7 @@ jobs:
         shell: bash
         run: |
           output=$(tag-validate validate "1.0.0-SNAPSHOT" --json)
-          is_dev=$(echo "$output" | jq -r '.is_development')
+          is_dev=$(echo "$output" | jq -r '.development_tag')
           if [ "$is_dev" != "true" ]; then
             echo "Error: SNAPSHOT not detected as development"
             exit 1
@@ -173,7 +173,7 @@ jobs:
         shell: bash
         run: |
           output=$(tag-validate validate "1.0.0" --json)
-          is_dev=$(echo "$output" | jq -r '.is_development')
+          is_dev=$(echo "$output" | jq -r '.development_tag')
           if [ "$is_dev" != "false" ]; then
             echo "Error: Stable tag incorrectly flagged as development"
             exit 1
@@ -209,7 +209,7 @@ jobs:
         shell: bash
         run: |
           output=$(tag-validate validate "1.0.0-alpha-pre-dev" --json)
-          is_dev=$(echo "$output" | jq -r '.is_development')
+          is_dev=$(echo "$output" | jq -r '.development_tag')
           if [ "$is_dev" != "true" ]; then
             echo "Error: Multiple dev keywords not detected"
             exit 1
@@ -586,9 +586,9 @@ jobs:
         shell: bash
         run: |
           output=$(tag-validate validate "1.0.0-alpha.1" --json)
-          is_dev=$(echo "$output" | jq -r '.is_development')
+          is_dev=$(echo "$output" | jq -r '.development_tag')
           if [ "$is_dev" != "true" ]; then
-            echo "Error: Expected is_development=true"
+            echo "Error: Expected development_tag=true"
             exit 1
           fi
           echo "✓ CLI development tag detection works"
@@ -642,11 +642,11 @@ jobs:
           tag-validate validate "2025.1.1" --json | \
             jq -e '.version_type == "calver"'
 
-          tag-validate validate "v1.0.0" --json | \
-            jq -e '.has_prefix == true'
+          tag-validate validate "v1.2.3" --json | \
+            jq -e '.version_prefix == true'
 
           tag-validate validate "1.0.0-beta" --json | \
-            jq -e '.is_development == true'
+            jq -e '.development_tag == true'
 
           echo "✓ Multiple formats work"
 

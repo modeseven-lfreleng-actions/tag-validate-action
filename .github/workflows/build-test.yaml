@@ -261,7 +261,7 @@ jobs:
           fi
 
           # Test SSH key verification with auto-detection
-          tag-validate verify-github \
+          tag-validate github \
             "$SSH_KEY" \
             --owner "$KEY_USER" \
             --json > ssh-result.json
@@ -293,7 +293,7 @@ jobs:
           fi
 
           # Test GPG subkey verification with auto-detection
-          tag-validate verify-github \
+          tag-validate github \
             "FCE8AAABF53080F6" \
             --owner "$KEY_USER" \
             --json > gpg-result.json

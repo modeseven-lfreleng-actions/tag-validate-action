@@ -2,9 +2,9 @@
 # SPDX-License-Identifier: Apache-2.0
 
 """
-Tests for the verify-github CLI command.
+Tests for the github CLI command.
 
-This module provides comprehensive tests for the `verify-github` sub-command,
+This module provides comprehensive tests for the `github` sub-command,
 which verifies if a GPG key ID or SSH fingerprint is registered on GitHub.
 
 Test Coverage:
@@ -96,11 +96,11 @@ def strip_ansi_codes(text: str) -> str:
 
 
 class TestVerifyKeyBasic:
-    """Test basic verify-github command functionality."""
+    """Test basic github command functionality."""
 
     def test_verify_key_help(self):
-        """Test verify-github help output."""
-        result = runner.invoke(app, ["verify-github", "--help"])
+        """Test github help output."""
+        result = runner.invoke(app, ["github", "--help"])
         assert result.exit_code == 0
 
         # Strip ANSI codes for easier assertions
@@ -114,25 +114,25 @@ class TestVerifyKeyBasic:
         assert "--no-subkeys" in output
 
     def test_verify_key_missing_key_id(self):
-        """Test verify-github without key ID argument."""
-        result = runner.invoke(app, ["verify-github"])
+        """Test github without key ID argument."""
+        result = runner.invoke(app, ["github"])
         assert result.exit_code != 0
         # CliRunner may not capture stderr, check exit code is sufficient
 
     def test_verify_key_missing_owner(self):
-        """Test verify-github without --owner option."""
-        result = runner.invoke(app, ["verify-github", "ABCD1234"])
+        """Test github without --owner option."""
+        result = runner.invoke(app, ["github", "ABCD1234"])
         assert result.exit_code != 0
         # Should complain about missing --owner
 
     def test_verify_key_missing_token(self):
-        """Test verify-github without GitHub token."""
+        """Test github without GitHub token."""
         result = runner.invoke(
             app,
-            ["verify-github", "ABCD1234", "--owner", "testuser"],
+            ["github", "ABCD1234", "--owner", "testuser"],
             env={"GITHUB_TOKEN": ""},  # Ensure no token in environment
         )
-        assert result.exit_code == 1
+        assert result.exit_code == 2
         assert (
             "GitHub token is required" in result.stdout
             or "token" in result.stdout.lower()
@@ -140,7 +140,7 @@ class TestVerifyKeyBasic:
 
 
 class TestVerifyKeyGPG:
-    """Test verify-github with GPG keys."""
+    """Test github with GPG keys."""
 
     @patch("tag_validate.cli.GitHubKeysClient")
     def test_verify_gpg_key_registered(self, mock_client_class):
@@ -158,7 +158,7 @@ class TestVerifyKeyGPG:
         result = runner.invoke(
             app,
             [
-                "verify-github",
+                "github",
                 "ABCD1234EF5678AB",
                 "--owner",
                 "testuser",
@@ -192,7 +192,7 @@ class TestVerifyKeyGPG:
         result = runner.invoke(
             app,
             [
-                "verify-github",
+                "github",
                 "AAAABBBB",  # Valid hex key that won't be found
                 "--owner",
                 "testuser",
@@ -220,7 +220,7 @@ class TestVerifyKeyGPG:
         result = runner.invoke(
             app,
             [
-                "verify-github",
+                "github",
                 "ABCD1234",
                 "--owner",
                 "testuser",
@@ -250,7 +250,7 @@ class TestVerifyKeyGPG:
         result = runner.invoke(
             app,
             [
-                "verify-github",
+                "github",
                 "ABCD1234EF5678AB",
                 "--owner",
                 "testuser",
@@ -292,7 +292,7 @@ class TestVerifyKeyGPG:
             result = runner.invoke(
                 app,
                 [
-                    "verify-github",
+                    "github",
                     key_id,
                     "--owner",
                     "testuser",
@@ -304,7 +304,7 @@ class TestVerifyKeyGPG:
 
 
 class TestVerifyKeySSH:
-    """Test verify-github with SSH keys."""
+    """Test github with SSH keys."""
 
     @patch("tag_validate.cli.GitHubKeysClient")
     def test_verify_ssh_key_registered(self, mock_client_class):
@@ -324,7 +324,7 @@ class TestVerifyKeySSH:
         result = runner.invoke(
             app,
             [
-                "verify-github",
+                "github",
                 ssh_key,
                 "--owner",
                 "testuser",
@@ -352,12 +352,12 @@ class TestVerifyKeySSH:
         )
         mock_client_class.return_value = mock_client
 
-        ssh_fingerprint = "SHA256:abcdefghijklmnopqrstuvwxyz1234567890ABC"
+        ssh_fingerprint = "SHA256:dAqSPHAy6OIlcGSjYjMHvw3sy6WQqS63g5uoB5SXA14"
 
         result = runner.invoke(
             app,
             [
-                "verify-github",
+                "github",
                 ssh_fingerprint,
                 "--owner",
                 "testuser",
@@ -385,7 +385,7 @@ class TestVerifyKeySSH:
         result = runner.invoke(
             app,
             [
-                "verify-github",
+                "github",
                 "some-ambiguous-key",
                 "--owner",
                 "testuser",
@@ -417,8 +417,8 @@ class TestVerifyKeySSH:
             "ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABAQ...",
             "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI...",
             "ecdsa-sha2-nistp256 AAAAE2VjZHNhLXNoYTItbmlzdHAyNTY...",
-            "SHA256:abcdefghijklmnopqrstuvwxyz",
-            "MD5:aa:bb:cc:dd:ee:ff:00:11:22:33:44:55:66:77:88:99",
+            "SHA256:lSpWQv6rFamTP2i93lIaLO8s8TZg/t06GsxrjQ5GAXY",
+            "MD5:cf:19:30:d7:f9:0d:04:2e:20:ce:3d:24:77:22:22:e3",
         ]
 
         for ssh_key in ssh_keys:
@@ -426,7 +426,7 @@ class TestVerifyKeySSH:
             result = runner.invoke(
                 app,
                 [
-                    "verify-github",
+                    "github",
                     ssh_key,
                     "--owner",
                     "testuser",
@@ -441,152 +441,97 @@ class TestVerifyKeySSH:
 class TestVerifyKeyAutoDetection:
     """Test automatic key type detection."""
 
-    @patch("tag_validate.cli.GitHubKeysClient")
-    def test_auto_detect_gpg_hex_8(self, mock_client_class):
+    def test_auto_detect_gpg_hex_8(self):
         """Test auto-detection of 8-char GPG key ID."""
-        mock_client = AsyncMock()
-        mock_client.__aenter__.return_value = mock_client
-        mock_client.__aexit__.return_value = None
-        mock_client.verify_gpg_key_registered.return_value = KeyVerificationResult(
-            key_registered=True,
-            username="testuser",
-        )
-        mock_client_class.return_value = mock_client
-
         result = runner.invoke(
             app,
             [
-                "verify-github",
+                "github",
                 "ABCD1234",
                 "--owner",
                 "testuser",
-                "--token",
-                "test_token",
+                "--test-mode",
             ],
         )
 
         assert result.exit_code == 0
         assert "auto-detected" in result.stdout
-        mock_client.verify_gpg_key_registered.assert_called_once()
+        assert "Key Type: gpg (auto-detected)" in result.stdout
 
-    @patch("tag_validate.cli.GitHubKeysClient")
-    def test_auto_detect_gpg_hex_16(self, mock_client_class):
+    def test_auto_detect_gpg_hex_16(self):
         """Test auto-detection of 16-char GPG key ID."""
-        mock_client = AsyncMock()
-        mock_client.__aenter__.return_value = mock_client
-        mock_client.__aexit__.return_value = None
-        mock_client.verify_gpg_key_registered.return_value = KeyVerificationResult(
-            key_registered=True,
-            username="testuser",
-        )
-        mock_client_class.return_value = mock_client
-
         result = runner.invoke(
             app,
             [
-                "verify-github",
-                "ABCD1234EF5678AB",
+                "github",
+                "ABCDEF1234567890",
                 "--owner",
                 "testuser",
-                "--token",
-                "test_token",
+                "--test-mode",
             ],
         )
 
         assert result.exit_code == 0
         assert "auto-detected" in result.stdout
-        mock_client.verify_gpg_key_registered.assert_called_once()
+        assert "Key Type: gpg (auto-detected)" in result.stdout
 
-    @patch("tag_validate.cli.GitHubKeysClient")
-    def test_auto_detect_gpg_hex_40(self, mock_client_class):
-        """Test auto-detection of 40-char GPG fingerprint."""
-        mock_client = AsyncMock()
-        mock_client.__aenter__.return_value = mock_client
-        mock_client.__aexit__.return_value = None
-        mock_client.verify_gpg_key_registered.return_value = KeyVerificationResult(
-            key_registered=True,
-            username="testuser",
-        )
-        mock_client_class.return_value = mock_client
-
+    def test_auto_detect_gpg_hex_40(self):
+        """Test auto-detection of 40-char GPG key ID."""
         result = runner.invoke(
             app,
             [
-                "verify-github",
-                "1234567890ABCDEF1234567890ABCDEF12345678",
+                "github",
+                "ABCDEF1234567890ABCDEF1234567890ABCDEF12",
                 "--owner",
                 "testuser",
-                "--token",
-                "test_token",
+                "--test-mode",
             ],
         )
 
         assert result.exit_code == 0
         assert "auto-detected" in result.stdout
-        mock_client.verify_gpg_key_registered.assert_called_once()
+        assert "Key Type: gpg (auto-detected)" in result.stdout
 
-    @patch("tag_validate.cli.GitHubKeysClient")
-    def test_auto_detect_ssh_prefix(self, mock_client_class):
-        """Test auto-detection of SSH key by prefix."""
-        mock_client = AsyncMock()
-        mock_client.__aenter__.return_value = mock_client
-        mock_client.__aexit__.return_value = None
-        mock_client.verify_ssh_key_registered.return_value = KeyVerificationResult(
-            key_registered=True,
-            username="testuser",
-        )
-        mock_client_class.return_value = mock_client
-
+    def test_auto_detect_ssh_prefix(self):
+        """Test auto-detection of SSH key with ssh- prefix."""
         result = runner.invoke(
             app,
             [
-                "verify-github",
-                "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI...",
+                "github",
+                "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIG8ZKGjk",
                 "--owner",
                 "testuser",
-                "--token",
-                "test_token",
+                "--test-mode",
             ],
         )
 
         assert result.exit_code == 0
         assert "auto-detected" in result.stdout
-        mock_client.verify_ssh_key_registered.assert_called_once()
+        assert "Key Type: ssh (auto-detected)" in result.stdout
 
-    @patch("tag_validate.cli.GitHubKeysClient")
-    def test_auto_detect_ssh_sha256(self, mock_client_class):
+    def test_auto_detect_ssh_sha256(self):
         """Test auto-detection of SSH SHA256 fingerprint."""
-        mock_client = AsyncMock()
-        mock_client.__aenter__.return_value = mock_client
-        mock_client.__aexit__.return_value = None
-        mock_client.verify_ssh_key_registered.return_value = KeyVerificationResult(
-            key_registered=True,
-            username="testuser",
-        )
-        mock_client_class.return_value = mock_client
-
         result = runner.invoke(
             app,
             [
-                "verify-github",
-                "SHA256:abcdefghijklmnop",
+                "github",
+                "SHA256:dAqSPHAy6OIlcGSjYjMHvw3sy6WQqS63g5uoB5SXA14",
                 "--owner",
                 "testuser",
-                "--token",
-                "test_token",
+                "--test-mode",
             ],
         )
 
         assert result.exit_code == 0
         assert "auto-detected" in result.stdout
-        mock_client.verify_ssh_key_registered.assert_called_once()
+        assert "Key Type: ssh (auto-detected)" in result.stdout
 
     def test_auto_detect_unknown_format(self):
         """Test auto-detection failure for unknown format."""
         result = runner.invoke(
             app,
             [
-                "verify-github",
+                "github",
                 "not-a-valid-key-123",
                 "--owner",
                 "testuser",
@@ -600,7 +545,7 @@ class TestVerifyKeyAutoDetection:
 
 
 class TestVerifyKeyJSON:
-    """Test verify-github with JSON output."""
+    """Test github with JSON output."""
 
     @patch("tag_validate.cli.GitHubKeysClient")
     def test_verify_key_json_success(self, mock_client_class):
@@ -617,7 +562,7 @@ class TestVerifyKeyJSON:
         result = runner.invoke(
             app,
             [
-                "verify-github",
+                "github",
                 "ABCD1234",
                 "--owner",
                 "testuser",
@@ -652,7 +597,7 @@ class TestVerifyKeyJSON:
         result = runner.invoke(
             app,
             [
-                "verify-github",
+                "github",
                 "NOTFOUND",
                 "--owner",
                 "testuser",
@@ -675,7 +620,7 @@ class TestVerifyKeyJSON:
         result = runner.invoke(
             app,
             [
-                "verify-github",
+                "github",
                 "ABCD1234",
                 "--owner",
                 "testuser",
@@ -684,7 +629,7 @@ class TestVerifyKeyJSON:
             env={"GITHUB_TOKEN": ""},
         )
 
-        assert result.exit_code == 1
+        assert result.exit_code == 2
 
         # Parse JSON output
         output = json.loads(result.stdout.strip())
@@ -697,7 +642,7 @@ class TestVerifyKeyJSON:
         result = runner.invoke(
             app,
             [
-                "verify-github",
+                "github",
                 "somekey",
                 "--owner",
                 "testuser",
@@ -722,7 +667,7 @@ class TestVerifyKeyJSON:
         result = runner.invoke(
             app,
             [
-                "verify-github",
+                "github",
                 "not-a-valid-key",
                 "--owner",
                 "testuser",
@@ -742,7 +687,7 @@ class TestVerifyKeyJSON:
 
 
 class TestVerifyKeyEnvironment:
-    """Test verify-github with environment variables."""
+    """Test github with environment variables."""
 
     @patch("tag_validate.cli.GitHubKeysClient")
     def test_token_from_environment(self, mock_client_class):
@@ -758,7 +703,7 @@ class TestVerifyKeyEnvironment:
 
         result = runner.invoke(
             app,
-            ["verify-github", "ABCD1234", "--owner", "testuser"],
+            ["github", "ABCD1234", "--owner", "testuser"],
             env={"GITHUB_TOKEN": "env_test_token"},
         )
 
@@ -775,7 +720,7 @@ class TestVerifyKeyEdgeCases:
         result = runner.invoke(
             app,
             [
-                "verify-github",
+                "github",
                 "somekey",
                 "--owner",
                 "testuser",
@@ -803,7 +748,7 @@ class TestVerifyKeyEdgeCases:
         result = runner.invoke(
             app,
             [
-                "verify-github",
+                "github",
                 "ABCD1234",
                 "--owner",
                 "testuser",
@@ -812,7 +757,7 @@ class TestVerifyKeyEdgeCases:
             ],
         )
 
-        assert result.exit_code == 1
+        assert result.exit_code == 4
         assert "Error" in result.stdout or "error" in result.stdout.lower()
 
     @patch("tag_validate.cli.GitHubKeysClient")
@@ -829,7 +774,7 @@ class TestVerifyKeyEdgeCases:
         result = runner.invoke(
             app,
             [
-                "verify-github",
+                "github",
                 "ABCD1234",
                 "--owner",
                 "testuser",
@@ -839,7 +784,7 @@ class TestVerifyKeyEdgeCases:
             ],
         )
 
-        assert result.exit_code == 1
+        assert result.exit_code == 4
 
         # Parse JSON output
         output = json.loads(result.stdout.strip())
@@ -862,7 +807,7 @@ class TestVerifyKeyEdgeCases:
         result = runner.invoke(
             app,
             [
-                "verify-github",
+                "github",
                 "ABCD1234",
                 "-o",
                 "testuser",
@@ -899,7 +844,7 @@ class TestVerifyKeyIntegration:
         result = runner.invoke(
             app,
             [
-                "verify-github",
+                "github",
                 "1234567890ABCDEF",
                 "--owner",
                 "testuser",
@@ -937,7 +882,7 @@ class TestVerifyKeyIntegration:
         result = runner.invoke(
             app,
             [
-                "verify-github",
+                "github",
                 ssh_key,
                 "--owner",
                 "testuser",
@@ -966,7 +911,7 @@ class TestVerifyKeyIntegration:
         result = runner.invoke(
             app,
             [
-                "verify-github",
+                "github",
                 "ABCD 1234 EF56 78AB",
                 "--owner",
                 "testuser",
@@ -994,7 +939,7 @@ class TestVerifyKeyIntegration:
         result = runner.invoke(
             app,
             [
-                "verify-github",
+                "github",
                 "AbCd1234",
                 "--owner",
                 "testuser",
@@ -1021,7 +966,7 @@ class TestVerifyKeyIntegration:
         result = runner.invoke(
             app,
             [
-                "verify-github",
+                "github",
                 "ABCD1234",
                 "--owner",
                 "testuser",

@@ -256,13 +256,12 @@ class TestTagValidator:
         assert result.version_type == "calver"
 
     def test_validate_version_invalid(self):
-        """Test validate_version with invalid version."""
+        """Test validate_version with other type version."""
         validator = TagValidator()
         result = validator.validate_version("not-a-version")
 
-        assert not result.is_valid
-        assert result.version_type == "unknown"
-        assert len(result.errors) > 0
+        assert result.is_valid
+        assert result.version_type == "other"
 
     def test_validate_version_ambiguous_calver_semver(self):
         """Test validate_version with ambiguous format (prefers SemVer)."""
@@ -467,12 +466,12 @@ class TestTagValidator:
         assert result.is_valid
 
     def test_validate_version_empty_string(self):
-        """Test version validation with empty string."""
+        """Test validate_version with empty string."""
         validator = TagValidator()
         result = validator.validate_version("")
 
-        assert not result.is_valid
-        assert result.version_type == "unknown"
+        assert result.is_valid
+        assert result.version_type == "other"
 
     def test_validate_semver_complex_prerelease(self):
         """Test SemVer with complex prerelease identifiers."""

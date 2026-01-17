@@ -19,7 +19,7 @@ Typical usage:
     config = ValidationConfig(
         require_semver=True,
         require_signed=True,
-        verify_github_key=True,
+        require_github=True,
     )
 
     workflow = ValidationWorkflow(config)
@@ -89,12 +89,12 @@ class ValidationWorkflow:
     async def _setup_ssh_allowed_signers(self) -> None:
         """Setup SSH allowed signers for the current repository."""
         try:
-            logger.info(f"Setting up SSH allowed signers for repository: {self.repo_path}")
+            logger.debug(f"Setting up SSH allowed signers for repository: {self.repo_path}")
             await self.operations._setup_ssh_allowed_signers(self.repo_path)
             # Verify the file was created
             signers_file = self.repo_path / ".ssh-allowed-signers"
             if signers_file.exists():
-                logger.info(f"SSH allowed signers file created at: {signers_file}")
+                logger.debug(f"SSH allowed signers file created at: {signers_file}")
             else:
                 logger.warning(f"SSH allowed signers file NOT found at: {signers_file}")
         except Exception as e:
@@ -105,6 +105,7 @@ class ValidationWorkflow:
         tag_name: str,
         github_user: Optional[str] = None,
         github_token: Optional[str] = None,
+        require_owners: Optional[list[str]] = None,
     ) -> ValidationResult:
         """Perform complete tag validation.
 
@@ -149,24 +150,24 @@ class ValidationWorkflow:
             logger.error(f"Tag info fetch failed: {e}")
             return result
 
-        # Step 2: Validate version format (skip if configured)
+        # Step 2: Detect version type (always runs - nearly zero cost)
+        # Type detection is always performed regardless of skip_version_validation
+        # This provides valuable information and has negligible performance impact
         if not self.config.skip_version_validation:
             version_result = self._validate_version(tag_name)
             result.version_info = version_result
 
-            if not version_result.is_valid:
-                result.is_valid = False
-                result.add_error(f"Invalid version format: {tag_name}")
-                for error in version_result.errors:
-                    result.add_error(f"  {error}")
-            else:
-                result.add_info(f"Version type: {version_result.version_type}")
+            # Always report detected type
+            result.add_info(f"Detected version type: {version_result.version_type}")
 
-                # Check version type requirements
+            # Only enforce type requirements if explicitly configured
+            if self.config.require_semver or self.config.require_calver:
                 if not self._check_version_requirements(version_result):
                     result.is_valid = False
                     return result
+            # Otherwise accept any type (including "other")
         else:
+            # Skip version validation entirely (legacy flag support)
             result.add_info("Version validation skipped (--skip-version-validation)")
 
         # Step 3: Detect and validate signature
@@ -185,49 +186,89 @@ class ValidationWorkflow:
             return result
 
         # Step 4: Verify key on GitHub (if requested and signature exists)
-        if self.config.verify_github_key:
+        if self.config.require_github:
             if signature_info.type in ["gpg", "ssh"] and signature_info.verified:
-                # Auto-detect GitHub username from tagger email if not provided
-                detected_user = github_user
-                if not detected_user and signature_info.signer_email:
-                    logger.debug(f"Attempting to auto-detect GitHub username from email: {signature_info.signer_email}")
-                    try:
-                        from .github_keys import GitHubKeysClient
-                        async with GitHubKeysClient(token=github_token) as client:
-                            detected_user = await client.lookup_username_by_email(signature_info.signer_email)
-                            if detected_user:
-                                logger.debug(f"Auto-detected GitHub username: {detected_user}")
-                                result.add_info(f"Auto-detected GitHub user @{detected_user} from tagger email")
-                            else:
-                                logger.warning(f"Could not auto-detect GitHub username from email: {signature_info.signer_email}")
-                                result.add_warning(f"Could not auto-detect GitHub username from email {signature_info.signer_email}")
-                    except Exception as e:
-                        logger.debug(f"Failed to auto-detect GitHub username: {e}")
-
-                if detected_user:
-                    try:
-                        key_result = await self._verify_github_key(
-                            signature_info,
-                            detected_user,
-                            github_token,
-                        )
-                        result.key_verification = key_result
-
-                        if not key_result.key_registered:
-                            result.is_valid = False
-                            result.add_error(
-                                f"Signing key not registered to GitHub user @{detected_user}"
-                            )
-                        else:
-                            result.add_info(
-                                f"Signing key verified for GitHub user @{detected_user}"
-                            )
-                    except Exception as e:
-                        result.add_warning(f"GitHub key verification failed: {e}")
-                        logger.warning(f"GitHub key verification failed: {e}")
+                # Check if token is available first
+                if not github_token:
+                    result.is_valid = False
+                    error_msg = "GitHub token is required. Set GITHUB_TOKEN environment variable or pass --token"
+                    result.add_error(error_msg)
+                    logger.error(error_msg)
                 else:
-                    result.add_warning("GitHub key verification requested but no username provided or detected")
-                    logger.warning("GitHub key verification requested but no username available")
+                    # Auto-detect GitHub username from tagger email if not provided
+                    detected_user = github_user
+                    was_enumerated = False
+                    if not detected_user and signature_info.signer_email:
+                        logger.debug(f"Attempting to auto-detect GitHub username from email: {signature_info.signer_email}")
+                        try:
+                            from .github_keys import GitHubKeysClient
+                            async with GitHubKeysClient(token=github_token) as client:
+                                detected_user = await client.lookup_username_by_email(signature_info.signer_email)
+                                if detected_user:
+                                    was_enumerated = True
+                                    logger.debug(f"Auto-detected GitHub username: {detected_user}")
+                                    result.add_info(f"Auto-detected GitHub user @{detected_user} from tagger email")
+                                else:
+                                    logger.warning(f"Could not auto-detect GitHub username from email: {signature_info.signer_email}")
+                        except Exception as e:
+                            logger.debug(f"Failed to auto-detect GitHub username: {e}")
+
+                    # Use require_owners if provided, otherwise use detected_user
+                    if require_owners:
+                        # Verify against required owners
+                        try:
+                            key_result = await self._require_github_key(
+                                signature_info,
+                                detected_user if detected_user else "",  # Not used when require_owners is set
+                                github_token,
+                                require_owners,
+                            )
+                            result.key_verification = key_result
+
+                            if not key_result.key_registered:
+                                result.is_valid = False
+                                result.add_error(
+                                    f"Signing key not registered to any of the required owners: {', '.join(require_owners)}"
+                                )
+                            else:
+                                result.add_info(
+                                    f"Signing key verified for required owner: {key_result.username}"
+                                )
+                        except Exception as e:
+                            result.is_valid = False
+                            result.add_error(f"GitHub key verification failed: {e}")
+                            logger.error(f"GitHub key verification failed: {e}")
+                    elif detected_user:
+                        try:
+                            key_result = await self._require_github_key(
+                                signature_info,
+                                detected_user,
+                                github_token,
+                                require_owners,
+                            )
+                            # Set enumerated flag if username was auto-detected
+                            if was_enumerated and key_result:
+                                key_result.enumerated = True
+                            result.key_verification = key_result
+
+                            if not key_result.key_registered:
+                                result.is_valid = False
+                                result.add_error(
+                                    f"Signing key not registered to GitHub user @{detected_user}"
+                                )
+                            else:
+                                result.add_info(
+                                    f"Signing key verified for GitHub user @{detected_user}"
+                                )
+                        except Exception as e:
+                            result.is_valid = False
+                            result.add_error(f"GitHub key verification failed: {e}")
+                            logger.error(f"GitHub key verification failed: {e}")
+                    else:
+                        result.is_valid = False
+                        error_msg = "GitHub key verification requested but no username provided or detected from tagger email"
+                        result.add_error(error_msg)
+                        logger.error(error_msg)
             else:
                 result.add_info("Skipping GitHub key verification (no valid signature)")
 
@@ -299,15 +340,31 @@ class ValidationWorkflow:
         Returns:
             bool: True if requirements are met
         """
-        # Check SemVer requirement
-        if self.config.require_semver and version_info.version_type != "semver":
-            logger.warning(f"Version type {version_info.version_type} does not match required semver")
-            return False
+        # Check version type requirement
+        type_required = self.config.require_semver or self.config.require_calver
 
-        # Check CalVer requirement
-        if self.config.require_calver and version_info.version_type != "calver":
-            logger.warning(f"Version type {version_info.version_type} does not match required calver")
-            return False
+        if type_required:
+            # Build list of required types
+            required_types = []
+            if self.config.require_semver:
+                required_types.append("semver")
+            if self.config.require_calver:
+                required_types.append("calver")
+
+            # Handle "both" version type - it satisfies both requirements
+            if version_info.version_type == "both":
+                # Check if BOTH are required (AND logic)
+                if self.config.require_semver and self.config.require_calver:
+                    # "both" satisfies the requirement for both
+                    pass  # Valid
+                else:
+                    # Only one is required, "both" still satisfies it (OR logic)
+                    pass  # Valid
+            else:
+                # Single type - check if it matches at least one required type (OR logic)
+                if version_info.version_type not in required_types:
+                    logger.warning(f"Version type {version_info.version_type} does not match required types: {', '.join(required_types)}")
+                    return False
 
         # Check development version requirement
         if self.config.reject_development and version_info.is_development:
@@ -352,8 +409,45 @@ class ValidationWorkflow:
         Returns:
             bool: True if requirements are met
         """
-        # Check if signature is required
-        if self.config.require_signed:
+        # Check if specific signature types are allowed
+        if self.config.allowed_signature_types:
+            # Specific signature types were specified - check if current type is allowed
+            if signature_info.type not in self.config.allowed_signature_types:
+                result.add_error(
+                    f"Tag signature type '{signature_info.type}' is not allowed. "
+                    f"Allowed types: {', '.join(self.config.allowed_signature_types)}"
+                )
+                logger.warning(
+                    f"Signature type '{signature_info.type}' not in allowed types: "
+                    f"{self.config.allowed_signature_types}"
+                )
+                return False
+
+            # Type is allowed - check for any hard errors
+            if signature_info.type == "invalid":
+                result.add_error("Tag signature is invalid or corrupted")
+                logger.warning(f"Invalid signature: key_id={signature_info.key_id}")
+                return False
+            elif signature_info.type == "lightweight":
+                result.add_error("Lightweight tags are not allowed when signing requirements are specified")
+                logger.warning("Lightweight tag when signature requirements specified")
+                return False
+
+            # Valid allowed signature type
+            if signature_info.type == "gpg-unverifiable":
+                result.add_info("Tag has GPG signature (key not available, but explicitly allowed)")
+            elif signature_info.verified:
+                result.add_info(f"Tag is signed with {signature_info.type.upper()} (verified)")
+            elif signature_info.type == "unsigned":
+                result.add_info("Tag is unsigned (explicitly allowed)")
+            else:
+                result.add_info(
+                    f"Tag is signed with {signature_info.type.upper()} "
+                    f"(signature present but not verified, explicitly allowed)"
+                )
+
+        # Check if signature is required (legacy boolean mode)
+        elif self.config.require_signed:
             if signature_info.type == "unsigned":
                 result.add_error("Tag must be signed but is unsigned")
                 logger.warning("Unsigned tag when signature is required")
@@ -416,11 +510,12 @@ class ValidationWorkflow:
 
         return True
 
-    async def _verify_github_key(
+    async def _require_github_key(
         self,
         signature_info: SignatureInfo,
         github_user: str,
         github_token: Optional[str] = None,
+        require_owners: Optional[list[str]] = None,
     ) -> KeyVerificationResult:
         """Verify signing key on GitHub.
 
@@ -428,6 +523,7 @@ class ValidationWorkflow:
             signature_info: Signature information
             github_user: GitHub username to verify against
             github_token: GitHub API token (optional)
+            require_owners: List of required GitHub usernames or emails that must own the signing key
 
         Returns:
             KeyVerificationResult: Key verification result
@@ -435,39 +531,123 @@ class ValidationWorkflow:
         Raises:
             Exception: If verification fails
         """
-        logger.debug(f"Verifying key on GitHub for user: {github_user}")
+        # If require_owners is specified, check against all owners
+        if require_owners:
+            logger.debug(f"Verifying key against required owners: {require_owners}")
 
-        async with GitHubKeysClient(token=github_token) as client:
-            if signature_info.type == "gpg":
-                if not signature_info.key_id:
-                    raise ValueError("GPG key ID not found in signature")
+            async with GitHubKeysClient(token=github_token) as client:
+                for owner in require_owners:
+                    # Check if owner is an email address
+                    if "@" in owner:
+                        logger.debug(f"Checking if signer email matches: {owner}")
+                        # For email, check if it matches the signer's email
+                        if signature_info.signer_email and signature_info.signer_email.lower() == owner.lower():
+                            # Email matches, now verify the key is registered to a GitHub account with this email
+                            # We need to look up the username by email
+                            try:
+                                username = await client.lookup_username_by_email(owner)
+                                if username:
+                                    logger.debug(f"Found GitHub username for email {owner}: {username}")
+                                    # Now verify the key is registered to this user
+                                    if signature_info.type == "gpg":
+                                        if not signature_info.key_id:
+                                            raise ValueError("GPG key ID not found in signature")
+                                        result = await client.verify_gpg_key_registered(
+                                            username=username,
+                                            key_id=signature_info.key_id,
+                                            tagger_email=signature_info.signer_email,
+                                        )
+                                    elif signature_info.type == "ssh":
+                                        if not signature_info.fingerprint:
+                                            raise ValueError("SSH fingerprint not found in signature")
+                                        result = await client.verify_ssh_key_registered(
+                                            username=username,
+                                            public_key_fingerprint=signature_info.fingerprint,
+                                        )
+                                    else:
+                                        raise ValueError(f"Cannot verify {signature_info.type} signature type")
 
-                result = await client.verify_gpg_key_registered(
-                    username=github_user,
-                    key_id=signature_info.key_id,
-                    tagger_email=signature_info.signer_email,
+                                    if result.key_registered:
+                                        logger.debug(f"Key verified for owner email: {owner}")
+                                        return result
+                            except Exception as e:
+                                logger.debug(f"Could not verify email {owner}: {e}")
+                                continue
+                        else:
+                            logger.debug(f"Signer email {signature_info.signer_email} does not match required owner {owner}")
+                    else:
+                        # Owner is a username
+                        logger.debug(f"Verifying key for GitHub username: {owner}")
+                        try:
+                            if signature_info.type == "gpg":
+                                if not signature_info.key_id:
+                                    raise ValueError("GPG key ID not found in signature")
+                                result = await client.verify_gpg_key_registered(
+                                    username=owner,
+                                    key_id=signature_info.key_id,
+                                    tagger_email=signature_info.signer_email,
+                                )
+                            elif signature_info.type == "ssh":
+                                if not signature_info.fingerprint:
+                                    raise ValueError("SSH fingerprint not found in signature")
+                                result = await client.verify_ssh_key_registered(
+                                    username=owner,
+                                    public_key_fingerprint=signature_info.fingerprint,
+                                )
+                            else:
+                                raise ValueError(f"Cannot verify {signature_info.type} signature type")
+
+                            if result.key_registered:
+                                logger.debug(f"Key verified for owner: {owner}")
+                                return result
+                        except Exception as e:
+                            logger.debug(f"Could not verify username {owner}: {e}")
+                            continue
+
+                # If we get here, none of the owners matched
+                logger.debug(f"Key not registered to any of the required owners: {require_owners}")
+                return KeyVerificationResult(
+                    key_registered=False,
+                    username=", ".join(require_owners),
+                    enumerated=False,
+                    key_info=None,
                 )
+        else:
+            # Original behavior: verify against single github_user
+            logger.debug(f"Verifying key on GitHub for user: {github_user}")
 
-            elif signature_info.type == "ssh":
-                if not signature_info.fingerprint:
-                    raise ValueError("SSH fingerprint not found in signature")
+            async with GitHubKeysClient(token=github_token) as client:
+                if signature_info.type == "gpg":
+                    if not signature_info.key_id:
+                        raise ValueError("GPG key ID not found in signature")
 
-                result = await client.verify_ssh_key_registered(
-                    username=github_user,
-                    public_key_fingerprint=signature_info.fingerprint,
-                )
+                    result = await client.verify_gpg_key_registered(
+                        username=github_user,
+                        key_id=signature_info.key_id,
+                        tagger_email=signature_info.signer_email,
+                    )
 
-            else:
-                raise ValueError(f"Cannot verify {signature_info.type} signature type")
+                elif signature_info.type == "ssh":
+                    if not signature_info.fingerprint:
+                        raise ValueError("SSH fingerprint not found in signature")
 
-        logger.debug(f"Key verification result: registered={result.key_registered}")
-        return result
+                    result = await client.verify_ssh_key_registered(
+                        username=github_user,
+                        public_key_fingerprint=signature_info.fingerprint,
+                    )
+
+                else:
+                    raise ValueError(f"Cannot verify {signature_info.type} signature type")
+
+            logger.debug(f"Key verification result: registered={result.key_registered}")
+            return result
 
     async def validate_tag_location(
         self,
         tag_location: str,
         github_user: Optional[str] = None,
         github_token: Optional[str] = None,
+        require_owners: Optional[list[str]] = None,
     ) -> ValidationResult:
         """Validate a tag from a location string with smart path detection.
 
@@ -505,6 +685,7 @@ class ValidationWorkflow:
             tag_location: Tag location string or tag name
             github_user: GitHub username for key verification
             github_token: GitHub token for API access
+            require_owners: List of required GitHub usernames or emails that must own the signing key
 
         Returns:
             ValidationResult: Complete validation result
@@ -534,7 +715,7 @@ class ValidationWorkflow:
                     self.detector = SignatureDetector(temp_dir)
 
                     # Validate the tag
-                    result = await self.validate_tag(tag, github_user, github_token)
+                    result = await self.validate_tag(tag, github_user, github_token, require_owners)
 
                     # Restore original repo path
                     self.repo_path = original_repo_path
@@ -588,7 +769,7 @@ class ValidationWorkflow:
                     self.detector = SignatureDetector(local_path)
 
                     # Validate the tag
-                    result = await self.validate_tag(potential_tag, github_user, github_token)
+                    result = await self.validate_tag(potential_tag, github_user, github_token, require_owners)
 
                     # Restore original repo path
                     self.repo_path = original_repo_path
@@ -652,7 +833,7 @@ class ValidationWorkflow:
                         self.detector = SignatureDetector(temp_dir)
 
                         # Validate the tag
-                        result = await self.validate_tag(tag, github_user, github_token)
+                        result = await self.validate_tag(tag, github_user, github_token, require_owners)
 
                         # Restore original repo path
                         self.repo_path = original_repo_path
@@ -692,7 +873,7 @@ class ValidationWorkflow:
 
         else:
             # No slash or @ - treat as local tag name in current repo
-            return await self.validate_tag(tag_location, github_user, github_token)
+            return await self.validate_tag(tag_location, github_user, github_token, require_owners)
 
     def create_validation_summary(self, result: ValidationResult) -> str:
         """Create a human-readable validation summary.
@@ -739,15 +920,14 @@ class ValidationWorkflow:
                 "gpg-unverifiable": "GPG (key not available)",
             }
             sig_type = type_display.get(s.type, s.type.upper())
-            lines.append(f"Signature: {sig_type}")
+            lines.append(f"Tag Signing")
 
             if s.type in ["gpg", "ssh", "gpg-unverifiable", "invalid"]:
+                lines.append(f"  Key Type: {sig_type}")
                 if s.type == "gpg-unverifiable":
                     lines.append(f"  Status: Key not available for verification")
                 elif s.type == "invalid":
                     lines.append(f"  Status: Signature is corrupted or tampered")
-                else:
-                    lines.append(f"  Verified: {'Yes' if s.verified else 'No'}")
                 if s.signer_email:
                     lines.append(f"  Signer: {s.signer_email}")
                 if s.key_id:
@@ -757,10 +937,13 @@ class ValidationWorkflow:
         # Key verification
         if result.key_verification:
             k = result.key_verification
-            lines.append(f"GitHub Key Verification:")
+            lines.append(f"GitHub Verification:")
             if k.username:
-                lines.append(f"  User: @{k.username}")
-            lines.append(f"  Registered: {'Yes' if k.key_registered else 'No'}")
+                user_display = f"@{k.username}"
+                if k.enumerated:
+                    user_display += " \\[enumerated]"
+                lines.append(f"  User: {user_display}")
+            lines.append(f"  Key Registered: {'Yes' if k.key_registered else 'No'}")
             lines.append("")
 
         # Errors
