@@ -187,7 +187,7 @@ def sample_validation_config():
     return ValidationConfig(
         require_signed=True,
         require_semver=True,
-        verify_github_key=True,
+        require_github=True,
         reject_development=True,
     )
 

@@ -290,9 +290,9 @@ class TestCalVerRepository:
 
         # Test various CalVer tags from the repo
         test_cases = [
-            ("2025.1.4-gpg-test", True, "calver"),
-            ("2025.1.3-ssh-signed", True, "calver"),
-            ("2025.1.2-unsigned", True, "calver"),
+            ("2025.1.4-gpg-test", True, "both"),
+            ("2025.1.3-ssh-signed", True, "both"),
+            ("2025.1.2-unsigned", True, "both"),
         ]
 
         for tag, should_be_valid, expected_type in test_cases:
@@ -417,9 +417,11 @@ class TestEndToEndWorkflow:
         version_result = validator.validate_version("2025.1.4")
 
         assert version_result.is_valid
-        assert version_result.version_type == "calver"
-        assert version_result.year == 2025
-        assert version_result.month == 1
+        assert version_result.version_type == "both"
+        # When type is "both", it's parsed as SemVer, so check SemVer fields
+        assert version_result.major == 2025
+        assert version_result.minor == 1
+        assert version_result.patch == 4
 
         # Step 2: Fetch tag information
         ops = TagOperations()

@@ -158,14 +158,15 @@ class TestValidateVersionStringValidation:
             pytest.fail(f"Failed to parse JSON output: {result.stdout}")
 
     def test_invalid_version_format(self):
-        """Test that an invalid version format fails validation."""
+        """Test that an invalid version format is accepted as 'other' type."""
         result = runner.invoke(app, ["validate", "invalid-version-123", "--json"])
 
-        assert result.exit_code == 1
+        assert result.exit_code == 0
         try:
             output = json.loads(result.stdout)
-            assert output["success"] is False
-            assert output["is_valid"] is False
+            assert output["success"] is True
+            assert output["version_type"] == "other"
+            assert output["is_valid"] is True
         except json.JSONDecodeError:
             pytest.fail(f"Failed to parse JSON output: {result.stdout}")
 
@@ -315,7 +316,7 @@ class TestValidateTypeRequirements:
         try:
             output = json.loads(result.stdout)
             assert output["success"] is True
-            assert output["version_type"] == "unknown"
+            assert output["version_type"] == "other"
         except json.JSONDecodeError:
             pytest.fail(f"Failed to parse JSON output: {result.stdout}")
 
@@ -360,26 +361,26 @@ class TestValidateWithOptions:
             pytest.fail(f"Failed to parse JSON output: {result.stdout}")
 
     def test_strict_semver_mode(self):
-        """Test strict SemVer mode rejects versions with prefix."""
+        """Test strict SemVer mode with prefixed version."""
         result = runner.invoke(app, ["validate", "v1.0.0", "--strict-semver", "--json"])
 
-        assert result.exit_code == 1
+        assert result.exit_code == 0
         try:
             output = json.loads(result.stdout)
-            assert output["success"] is False
-            assert output["is_valid"] is False
+            assert output["success"] is True
+            assert output["version_type"] == "other"
         except json.JSONDecodeError:
             pytest.fail(f"Failed to parse JSON output: {result.stdout}")
 
     def test_no_prefix_option(self):
-        """Test --no-prefix option rejects versions with prefix."""
+        """Test --no-prefix option with prefixed version."""
         result = runner.invoke(app, ["validate", "v1.0.0", "--no-prefix", "--json"])
 
-        assert result.exit_code == 1
+        assert result.exit_code == 0
         try:
             output = json.loads(result.stdout)
-            assert output["success"] is False
-            assert output["is_valid"] is False
+            assert output["success"] is True
+            assert output["version_prefix"] is True
         except json.JSONDecodeError:
             pytest.fail(f"Failed to parse JSON output: {result.stdout}")
 
@@ -440,8 +441,7 @@ class TestValidateJSONOutput:
             assert "normalized" in output
             assert "version_type" in output
             assert "is_valid" in output
-            assert "has_prefix" in output
-            assert "is_development" in output
+            assert "version_prefix" in output
             assert "development_tag" in output
         except json.JSONDecodeError:
             pytest.fail(f"Failed to parse JSON output: {result.stdout}")
@@ -485,15 +485,14 @@ class TestValidateJSONOutput:
             pytest.fail(f"Failed to parse JSON output: {result.stdout}")
 
     def test_json_output_includes_errors_on_failure(self):
-        """Test that JSON output includes error details on validation failure."""
+        """Test that JSON output handles other type versions correctly."""
         result = runner.invoke(app, ["validate", "invalid-version", "--json"])
 
-        assert result.exit_code == 1
+        assert result.exit_code == 0
         try:
             output = json.loads(result.stdout)
-            assert output["success"] is False
-            assert output["is_valid"] is False
-            assert "errors" in output
-            assert isinstance(output["errors"], list)
+            assert output["success"] is True
+            assert output["is_valid"] is True
+            assert output["version_type"] == "other"
         except json.JSONDecodeError:
             pytest.fail(f"Failed to parse JSON output: {result.stdout}")

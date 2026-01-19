@@ -443,7 +443,7 @@ class TestValidationConfig:
 
         assert config.require_signed is False
         assert config.require_unsigned is False
-        assert config.verify_github_key is False
+        assert config.require_github is False
         assert config.require_semver is False
         assert config.require_calver is False
 
@@ -452,14 +452,14 @@ class TestValidationConfig:
         config = ValidationConfig(
             require_signed=True,
             require_semver=True,
-            verify_github_key=True,
+            require_github=True,
             reject_development=True,
             allow_prefix=False,
         )
 
         assert config.require_signed is True
         assert config.require_semver is True
-        assert config.verify_github_key is True
+        assert config.require_github is True
         assert config.reject_development is True
         assert config.allow_prefix is False
 

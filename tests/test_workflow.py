@@ -107,7 +107,7 @@ class TestValidationWorkflow:
         mock_version_info = VersionInfo(
             raw="invalid",
             is_valid=False,
-            version_type="unknown",
+            version_type="other",
             errors=["Invalid version format"],
         )
 
@@ -118,8 +118,9 @@ class TestValidationWorkflow:
             result = await workflow.validate_tag("invalid")
 
             assert result.is_valid is False
-            assert len(result.errors) > 0
-            assert "Invalid version format" in result.errors[0]
+            # Check that version validation failed (errors are now in version_info.errors)
+            assert len(result.version_info.errors) > 0
+            assert "Invalid version format" in result.version_info.errors[0]
 
     @pytest.mark.asyncio
     async def test_validate_tag_unsigned_when_signed_required(self):
@@ -165,7 +166,7 @@ class TestValidationWorkflow:
         """Test tag validation with GitHub key verification."""
         config = ValidationConfig(
             require_signed=True,
-            verify_github_key=True,
+            require_github=True,
         )
         workflow = ValidationWorkflow(config)
 
@@ -203,9 +204,11 @@ class TestValidationWorkflow:
             patch.object(
                 workflow, "_detect_signature", return_value=mock_signature_info
             ),
-            patch.object(workflow, "_verify_github_key", return_value=mock_key_result),
+            patch.object(workflow, "_require_github_key", return_value=mock_key_result),
         ):
-            result = await workflow.validate_tag("v1.2.3", github_user="testuser")
+            result = await workflow.validate_tag(
+                "v1.2.3", github_user="testuser", github_token="test_token"
+            )
 
             assert result.is_valid is True
             assert result.key_verification == mock_key_result
@@ -215,7 +218,7 @@ class TestValidationWorkflow:
         """Test validation failure when GitHub key is not registered."""
         config = ValidationConfig(
             require_signed=True,
-            verify_github_key=True,
+            require_github=True,
         )
         workflow = ValidationWorkflow(config)
 
@@ -253,9 +256,11 @@ class TestValidationWorkflow:
             patch.object(
                 workflow, "_detect_signature", return_value=mock_signature_info
             ),
-            patch.object(workflow, "_verify_github_key", return_value=mock_key_result),
+            patch.object(workflow, "_require_github_key", return_value=mock_key_result),
         ):
-            result = await workflow.validate_tag("v1.2.3", github_user="testuser")
+            result = await workflow.validate_tag(
+                "v1.2.3", github_user="testuser", github_token="test_token"
+            )
 
             assert result.is_valid is False
             assert any("not registered" in error.lower() for error in result.errors)
@@ -483,7 +488,7 @@ class TestValidationWorkflow:
             result = await workflow.validate_tag_location("v1.2.3")
 
             assert result == mock_result
-            mock_validate.assert_called_once_with("v1.2.3", None, None)
+            mock_validate.assert_called_once_with("v1.2.3", None, None, None)
 
     @pytest.mark.asyncio
     async def test_validate_tag_location_remote(self, tmp_path):
@@ -572,7 +577,7 @@ class TestValidationWorkflow:
             version_info=VersionInfo(
                 raw="invalid",
                 is_valid=False,
-                version_type="unknown",
+                version_type="other",
                 errors=["Invalid version format"],
             ),
         )
@@ -659,7 +664,7 @@ class TestValidationWorkflow:
             mock_detect.assert_called_once_with("v1.2.3")
 
     @pytest.mark.asyncio
-    async def test_verify_github_key_gpg(self):
+    async def test_require_github_key_gpg(self):
         """Test GitHub GPG key verification."""
         config = ValidationConfig()
         workflow = ValidationWorkflow(config)
@@ -682,7 +687,7 @@ class TestValidationWorkflow:
         with patch("tag_validate.workflow.GitHubKeysClient") as mock_keys_client:
             mock_keys_client.return_value.__aenter__.return_value = mock_client
 
-            result = await workflow._verify_github_key(
+            result = await workflow._require_github_key(
                 signature_info,
                 "testuser",
                 "token123",
@@ -692,7 +697,7 @@ class TestValidationWorkflow:
             mock_client.verify_gpg_key_registered.assert_called_once()
 
     @pytest.mark.asyncio
-    async def test_verify_github_key_ssh(self):
+    async def test_require_github_key_ssh(self):
         """Test GitHub SSH key verification."""
         config = ValidationConfig()
         workflow = ValidationWorkflow(config)
@@ -714,7 +719,7 @@ class TestValidationWorkflow:
         with patch("tag_validate.workflow.GitHubKeysClient") as mock_keys_client:
             mock_keys_client.return_value.__aenter__.return_value = mock_client
 
-            result = await workflow._verify_github_key(
+            result = await workflow._require_github_key(
                 signature_info,
                 "testuser",
                 "token123",
@@ -724,7 +729,7 @@ class TestValidationWorkflow:
             mock_client.verify_ssh_key_registered.assert_called_once()
 
     @pytest.mark.asyncio
-    async def test_verify_github_key_missing_key_id(self):
+    async def test_require_github_key_missing_key_id(self):
         """Test GitHub key verification with missing GPG key ID."""
         config = ValidationConfig()
         workflow = ValidationWorkflow(config)
@@ -736,10 +741,10 @@ class TestValidationWorkflow:
         )
 
         with pytest.raises(ValueError, match="GPG key ID not found"):
-            await workflow._verify_github_key(signature_info, "testuser", "test_token")
+            await workflow._require_github_key(signature_info, "testuser", "test_token")
 
     @pytest.mark.asyncio
-    async def test_verify_github_key_missing_fingerprint(self):
+    async def test_require_github_key_missing_fingerprint(self):
         """Test GitHub key verification with missing SSH fingerprint."""
         config = ValidationConfig()
         workflow = ValidationWorkflow(config)
@@ -751,7 +756,7 @@ class TestValidationWorkflow:
         )
 
         with pytest.raises(ValueError, match="SSH fingerprint not found"):
-            await workflow._verify_github_key(signature_info, "testuser", "test_token")
+            await workflow._require_github_key(signature_info, "testuser", "test_token")
 
     @pytest.mark.asyncio
     async def test_validate_tag_fetch_error(self):

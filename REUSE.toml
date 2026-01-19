@@ -9,7 +9,8 @@ version = 1
 path = [
      ".github/gpg-export/gpg-public-key.asc",
      ".ssh-allowed-signers",
-     "src/tag_validate/_version.py"
+     "src/tag_validate/_version.py",
+     "tests/example-keys/**"
 ]
 SPDX-License-Identifier = "Apache-2.0"
 SPDX-FileCopyrightText = "2025 The Linux Foundation"

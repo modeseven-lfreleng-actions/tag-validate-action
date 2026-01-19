@@ -244,7 +244,7 @@ class TestVerifyWithOptions:
                 "semver",
                 "--require-signed",
                 "true",
-                "--verify-github-key",
+                "--require-github",
                 "--json",
             ],
         )

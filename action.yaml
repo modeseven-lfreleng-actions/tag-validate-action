@@ -24,25 +24,41 @@ inputs:
     required: false
     default: ''
   require_type:
-    description: 'Required tag type (semver|calver|none)'
+    description: >-
+      Required tag type: semver, calver, both, none (comma-separated for
+      multiple). When omitted or set to 'none', any format is accepted
+      (including customtags). Examples: 'semver', 'semver,calver', 'none'.
     required: false
-    default: 'none'
+    default: ''
   require_signed:
     description: >-
-      Signature requirement:
-      - true: Require ANY verified signature (gpg or ssh)
+      Signature requirement (comma-separated for multiple, e.g., 'gpg,ssh'):
       - gpg: Require verified GPG signature
       - ssh: Require verified SSH signature
-      - gpg-unverifiable: Require GPG signature (verification optional)
-      - signed: Require any signature type (including unverifiable)
-      - false: Must be unsigned
-      - ambivalent: Don't care (default)
+      - gpg-unverifiable: Accept GPG signature without verification
+      - unsigned: Must be unsigned
+      Omit for no signature requirement.
     required: false
-    default: 'ambivalent'
-  verify_github:
+    default: ''
+  require_github:
     description: >-
-      Verify that the signing key is registered on the GitHub account
-      of the tag creator. Requires a GitHub token.
+      Requires that the signing key is registered to a GitHub account.
+      Requires a GitHub token.
+    required: false
+    default: 'false'
+  require_owner:
+    description: >-
+      GitHub username(s) or email address(es) that must own the signing key
+      (comma or space-separated for multiple, e.g., 'octocat,monalisa' or
+      'user@example.com').
+      Requires a GitHub token. When specified, require_github is implied.
+    required: false
+    default: ''
+  reject_development:
+    description: >-
+      Reject development/pre-release tags (tags containing alpha, beta, rc, dev,
+      pre, snapshot, nightly, canary, or preview). When enabled, validation will
+      fail for any tag identified as a development version.
     required: false
     default: 'false'
   permit_missing:
@@ -62,7 +78,11 @@ inputs:
     required: false
     default: ''
   debug:
-    description: 'Enable debug output in action logs'
+    description: >-
+      Enable debug output in action logs. This enables both bash command
+      tracing (set -x) and Python verbose logging (--verbose flag), providing
+      comprehensive debugging information including git operations, API calls,
+      and internal validation steps.
     required: false
     default: 'false'
   use_local_action:
@@ -77,7 +97,7 @@ outputs:
     description: 'Set true if tag passes validation checks'
     value: ${{ steps.validate.outputs.valid }}
   tag_type:
-    description: 'Detected tag type (semver|calver|both|unknown)'
+    description: 'Detected tag type (semver|calver|both|other|unknown)'
     value: ${{ steps.validate.outputs.tag_type }}
   signing_type:
     # yamllint disable rule:line-length
@@ -110,7 +130,10 @@ runs:
       if: inputs.use_local_action == 'true' || contains(github.repository, 'lfreleng-actions/tag-validate-action')
       shell: bash
       run: |
-        pip install -e "${{ github.action_path }}"
+        # Install dependencies without the package itself to avoid setuptools-scm issues
+        pip install dependamerge>=0.1.19 aiolimiter>=1.2.1 "httpx[http2]>=0.28.1" pydantic>=2.12.5 rich>=14.2.0 typer>=0.21.1 python-gnupg>=0.5.3 cryptography>=46.0.3 packaging>=24.2
+        # Add the source directory to PYTHONPATH for direct module access
+        echo "PYTHONPATH=${{ github.action_path }}/src:${PYTHONPATH:-}" >> "$GITHUB_ENV"
 
     - name: 'Fetch tag objects'
       shell: bash
@@ -133,9 +156,11 @@ runs:
         set -euo pipefail
 
         # Normalize inputs to lowercase for case-insensitive matching
-        REQUIRE_TYPE=$(echo "${{ inputs.require_type }}" | tr '[:upper:]' '[:lower:]')
-        REQUIRE_SIGNED=$(echo "${{ inputs.require_signed }}" | tr '[:upper:]' '[:lower:]')
-        VERIFY_GITHUB=$(echo "${{ inputs.verify_github }}" | tr '[:upper:]' '[:lower:]')
+        REQUIRE_TYPE=$(echo "${{ inputs.require_type }}" | tr '[:upper:]' '[:lower:]' | tr -d ' ')
+        REQUIRE_SIGNED=$(echo "${{ inputs.require_signed }}" | tr '[:upper:]' '[:lower:]' | tr -d ' ')
+        REQUIRE_GITHUB=$(echo "${{ inputs.require_github }}" | tr '[:upper:]' '[:lower:]')
+        REQUIRE_OWNER="${{ inputs.require_owner }}"
+        REJECT_DEVELOPMENT=$(echo "${{ inputs.reject_development }}" | tr '[:upper:]' '[:lower:]')
         PERMIT_MISSING=$(echo "${{ inputs.permit_missing }}" | tr '[:upper:]' '[:lower:]')
         DEBUG=$(echo "${{ inputs.debug }}" | tr '[:upper:]' '[:lower:]')
 
@@ -177,7 +202,7 @@ runs:
         # Common args for both validate and verify commands
         COMMON_ARGS=()
 
-        # Add --require-type if it's not empty (including "none")
+        # Add --require-type if it's not empty (supports comma-separated values)
         if [ -n "${REQUIRE_TYPE}" ]; then
           COMMON_ARGS+=("--require-type" "${REQUIRE_TYPE}")
         fi
@@ -185,42 +210,40 @@ runs:
         # Signature-specific args only for verify command
         VERIFY_ARGS=()
 
-        # Handle require_signed variations
-        # Values: true, gpg, ssh, gpg-unverifiable, signed, false, ambivalent
-        case "${REQUIRE_SIGNED}" in
-          true)
-            # Require any verified signature (gpg or ssh)
-            VERIFY_ARGS+=("--require-signed" "true")
-            ;;
-          gpg|ssh)
-            # Require specific signature type (verified)
-            VERIFY_ARGS+=("--require-signed" "${REQUIRE_SIGNED}")
-            ;;
-          gpg-unverifiable)
-            # Require GPG signature but don't enforce verification
-            VERIFY_ARGS+=("--require-signed" "gpg-unverifiable")
-            ;;
-          signed)
-            # Require any signature (including unverifiable)
-            VERIFY_ARGS+=("--require-signed" "signed")
-            ;;
-          false)
-            # Explicitly require unsigned
-            VERIFY_ARGS+=("--require-signed" "false")
-            ;;
-          ambivalent)
-            # Don't add --require-signed flag (don't care)
-            ;;
-        esac
-
-        # Add GitHub key verification if requested
-        if [ "${VERIFY_GITHUB}" = "true" ]; then
-          VERIFY_ARGS+=("--verify-github-key")
+        # Add --require-signed if it's not empty (supports comma-separated values)
+        # Values: gpg, ssh, gpg-unverifiable, unsigned (or comma-separated combinations)
+        # Handle backward compatibility for boolean values
+        if [ -n "${REQUIRE_SIGNED}" ]; then
+          # Convert boolean values for backward compatibility
+          case "${REQUIRE_SIGNED}" in
+            "true")
+              # For backward compatibility: true means require any valid signature
+              VERIFY_ARGS+=("--require-signed" "gpg,ssh")
+              ;;
+            "false")
+              # For backward compatibility: false means accept unsigned
+              VERIFY_ARGS+=("--require-signed" "unsigned")
+              ;;
+            *)
+              # Pass through specific signature types as-is
+              VERIFY_ARGS+=("--require-signed" "${REQUIRE_SIGNED}")
+              ;;
+          esac
         fi
 
-        # Add owner if provided
-        if [ -n "${{ inputs.owner }}" ]; then
-          VERIFY_ARGS+=("--owner" "${{ inputs.owner }}")
+        # Add GitHub key verification if requested
+        if [ "${REQUIRE_GITHUB}" = "true" ]; then
+          VERIFY_ARGS+=("--require-github")
+        fi
+
+        # Add require-owner if provided (comma or space separated values)
+        if [ -n "${REQUIRE_OWNER}" ]; then
+          VERIFY_ARGS+=("--require-owner" "${REQUIRE_OWNER}")
+        fi
+
+        # Add reject-development flag if enabled (only for verify command)
+        if [ "${REJECT_DEVELOPMENT}" = "true" ]; then
+          VERIFY_ARGS+=("--reject-development")
         fi
 
         # Add permit_missing flag if enabled (applies to both)
@@ -254,15 +277,21 @@ runs:
         # Note: This is safe to log because sensitive data (GITHUB_TOKEN) is passed via
         # environment variable (see env section below), NOT as a CLI argument
         EXIT_CODE=0
+        # Add --verbose flag when debug is enabled for comprehensive Python logging
+        VERBOSE_FLAG=""
+        if [ "${DEBUG}" = "true" ]; then
+          VERBOSE_FLAG="--verbose"
+        fi
+
         if [ "${USE_VERSION_ONLY}" = "true" ]; then
           # validate command only uses common args (no signature args)
-          echo "🔍 Executing: ${CLI_CMD} validate \"${TAG_LOCATION}\" ${COMMON_ARGS[@]} --json"
-          JSON_OUTPUT=$(${CLI_CMD} validate "${TAG_LOCATION}" "${COMMON_ARGS[@]}" --json 2>&1) || EXIT_CODE=$?
+          echo "🔍 Executing: ${CLI_CMD} ${VERBOSE_FLAG} validate \"${TAG_LOCATION}\" ${COMMON_ARGS[@]} --json"
+          JSON_OUTPUT=$(${CLI_CMD} ${VERBOSE_FLAG} validate "${TAG_LOCATION}" "${COMMON_ARGS[@]}" --json 2>&1) || EXIT_CODE=$?
         else
           # verify command uses both common and verify-specific args
           ALL_VERIFY_ARGS=("${COMMON_ARGS[@]}" "${VERIFY_ARGS[@]}")
-          echo "🔍 Executing: ${CLI_CMD} verify \"${TAG_LOCATION}\" ${ALL_VERIFY_ARGS[@]} --json"
-          JSON_OUTPUT=$(${CLI_CMD} verify "${TAG_LOCATION}" "${ALL_VERIFY_ARGS[@]}" --json 2>&1) || EXIT_CODE=$?
+          echo "🔍 Executing: ${CLI_CMD} ${VERBOSE_FLAG} verify \"${TAG_LOCATION}\" ${ALL_VERIFY_ARGS[@]} --json"
+          JSON_OUTPUT=$(${CLI_CMD} ${VERBOSE_FLAG} verify "${TAG_LOCATION}" "${ALL_VERIFY_ARGS[@]}" --json 2>&1) || EXIT_CODE=$?
         fi
 
         # Extract and validate JSON from output using Python
@@ -333,6 +362,9 @@ runs:
             success = str(data.get("success", False)).lower()
             tag_name = data.get("tag_name", data.get("version", ""))
             version_type = data.get("version_type", data.get("detected_type", "unknown")) or "unknown"
+            # Map 'other' to 'other' (custom format), keep all other values as-is
+            if version_type not in ["semver", "calver", "both", "other"]:
+                version_type = "unknown"
             signature_type = data.get("signature_type", "unsigned") or "unsigned"
 
             # Determine development tag
