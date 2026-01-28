@@ -57,7 +57,8 @@ jobs:
         uses: lfreleng-actions/repository-metadata-action@ceabcd987d13d7bfefd2372e01eebb0ddac45956  # v0.2.0
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}
-          generate_summary: 'false'
+          github_summary: 'true'
+          gerrit_summary: 'false'
           artifact_upload: 'true'
           artifact_formats: 'json'
 
@@ -176,7 +177,7 @@ jobs:
 
       - name: "Security scan with Grype (SARIF)"
         # yamllint disable-line rule:line-length
-        uses: anchore/scan-action@0d444ed77d83ee2ba7f5ced0d90d640a1281d762  # v7.3.0
+        uses: anchore/scan-action@8d2fce09422cd6037e577f4130e9b925e9a37175  # v7.3.1
         id: grype-sarif
         with:
           sbom: "${{ steps.sbom.outputs.sbom_json_path }}"
@@ -186,7 +187,7 @@ jobs:
 
       - name: "Security scan with Grype (Text/Table)"
         # yamllint disable-line rule:line-length
-        uses: anchore/scan-action@0d444ed77d83ee2ba7f5ced0d90d640a1281d762  # v7.3.0
+        uses: anchore/scan-action@8d2fce09422cd6037e577f4130e9b925e9a37175  # v7.3.1
         id: grype-table
         if: always()
         with:
