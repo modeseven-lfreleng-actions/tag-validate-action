@@ -12,23 +12,28 @@ import asyncio
 import logging
 import sys
 from pathlib import Path
-from typing import Optional
 
 import typer
 from rich.console import Console
+from rich.logging import RichHandler
 from rich.panel import Panel
 from rich.table import Table
-from rich.logging import RichHandler
 
 from . import __version__
+from .display_utils import format_server_display, format_user_details
 from .gerrit_keys import GerritKeysClient
 from .github_keys import GitHubKeysClient
 from .github_summary import write_validation_summary
 from .models import KeyVerificationResult, ValidationConfig
-from .signature import SignatureDetector, SignatureDetectionError
+from .netrc import (
+    NetrcParseError,
+    find_netrc_file,
+    get_credentials_for_host,
+    load_netrc,
+)
+from .signature import SignatureDetectionError, SignatureDetector
 from .validation import TagValidator
 from .workflow import ValidationWorkflow
-from .display_utils import format_user_details, format_server_display
 
 # Exit codes
 EXIT_SUCCESS = 0
@@ -96,8 +101,8 @@ def _normalize_ssh_fingerprint(key_id: str) -> str:
     Raises:
         ValueError: If fingerprint format is invalid
     """
-    import re
     import base64
+    import re
 
     # Remove common SSH algorithm prefixes
     key_lower = key_id.lower()
@@ -158,7 +163,7 @@ def _normalize_ssh_fingerprint(key_id: str) -> str:
     return normalized
 
 
-async def _resolve_owner_to_username(owner: str, github_token: Optional[str] = None) -> str:
+async def _resolve_owner_to_username(owner: str, github_token: str | None = None) -> str:
     """Resolve owner (email or username) to GitHub username.
 
     Args:
@@ -224,7 +229,7 @@ if verbose or debug:
 logging.getLogger("httpx").setLevel(logging.WARNING)
 
 
-def parse_multi_value_option(value: Optional[str]) -> list[str]:
+def parse_multi_value_option(value: str | None) -> list[str]:
     """Parse comma or space-separated values from an option.
 
     Args:
@@ -395,7 +400,7 @@ def version_callback(value: bool):
 @app.callback()
 def main(
     ctx: typer.Context,
-    version: Optional[bool] = typer.Option(
+    version: bool | None = typer.Option(
         None,
         "--version",
         "-v",
@@ -459,29 +464,47 @@ def verify_gerrit(
         "-t",
         help="Key type: 'gpg', 'ssh', or 'auto' (default: auto-detect)",
     ),
-    server: Optional[str] = typer.Option(
+    server: str | None = typer.Option(
         None,
         "--server",
         "-s",
         help="Gerrit server hostname or URL (e.g., 'gerrit.onap.org' or 'https://gerrit.example.com')",
     ),
-    github_org: Optional[str] = typer.Option(
+    github_org: str | None = typer.Option(
         None,
         "--github-org",
         "-g",
         help="GitHub organization for server auto-discovery (e.g., 'onap' -> 'gerrit.onap.org')",
     ),
-    gerrit_username: Optional[str] = typer.Option(
+    gerrit_username: str | None = typer.Option(
         None,
         "--gerrit-username",
-        envvar="GERRIT_USERNAME",
-        help="Gerrit username for HTTP authentication (can also use GERRIT_USERNAME env var)",
+        help="Gerrit username for HTTP authentication (priority: CLI > .netrc > GERRIT_USERNAME env var)",
     ),
-    gerrit_password: Optional[str] = typer.Option(
+    gerrit_password: str | None = typer.Option(
         None,
         "--gerrit-password",
-        envvar="GERRIT_PASSWORD",
-        help="Gerrit HTTP password for authentication (can also use GERRIT_PASSWORD env var)",
+        help="Gerrit HTTP password for authentication (priority: CLI > .netrc > GERRIT_PASSWORD env var)",
+    ),
+    no_netrc: bool = typer.Option(
+        False,
+        "--no-netrc",
+        help="Disable .netrc credential lookup for Gerrit authentication",
+    ),
+    netrc_file: Path | None = typer.Option(
+        None,
+        "--netrc-file",
+        help="Explicit path to .netrc file for Gerrit credentials",
+        exists=True,
+        file_okay=True,
+        dir_okay=False,
+        readable=True,
+        resolve_path=True,
+    ),
+    netrc_optional: bool = typer.Option(
+        True,
+        "--netrc-optional/--netrc-required",
+        help="Whether to fail if .netrc file is not found (default: optional)",
     ),
     json_output: bool = typer.Option(
         False,
@@ -509,9 +532,17 @@ def verify_gerrit(
     where --server takes precedence.
 
     Authentication is optional but required for Gerrit servers that restrict
-    public access to user key information. Use --gerrit-username and
-    --gerrit-password, or set GERRIT_USERNAME and GERRIT_PASSWORD environment
-    variables. The password must be a Gerrit HTTP password generated from
+    public access to user key information.
+
+    Credentials are loaded in this order:
+    1. CLI options: --gerrit-username and --gerrit-password
+    2. .netrc file (if not disabled with --no-netrc)
+    3. Environment variables: GERRIT_USERNAME and GERRIT_PASSWORD
+
+    .netrc search order: ./.netrc, ~/.netrc, ~/_netrc (Windows)
+    Use --netrc-file to specify an explicit path.
+
+    The password must be a Gerrit HTTP password generated from
     your account settings, not your SSO/LDAP password.
 
     Examples:
@@ -572,7 +603,7 @@ def verify_gerrit(
                             }
                             console.print_json(data=result)
                         else:
-                            console.print(f"[green]✅ SSH key parsing successful[/green]")
+                            console.print("[green]✅ SSH key parsing successful[/green]")
                             console.print(f"Original: {key_id}")
                             console.print(f"Normalized: {normalized_fingerprint}")
                     except Exception as e:
@@ -593,7 +624,7 @@ def verify_gerrit(
                         }
                         console.print_json(data=result)
                     else:
-                        console.print(f"[green]✅ GPG key parsing successful[/green]")
+                        console.print("[green]✅ GPG key parsing successful[/green]")
                         console.print(f"Original: {key_id}")
                         console.print(f"Normalized: {key_id.upper().replace('0X', '')}")
 
@@ -611,6 +642,8 @@ def verify_gerrit(
         return
 
     async def _verify():
+        nonlocal gerrit_username, gerrit_password
+
         try:
             # Suppress ALL logs when JSON output is requested
             if json_output:
@@ -624,6 +657,36 @@ def verify_gerrit(
                 else:
                     console.print(f"[red]❌ {error_msg}[/red]")
                 raise typer.Exit(EXIT_INVALID_INPUT)
+
+            # Resolve credentials: CLI args > netrc > environment
+            effective_host = server if server else f"gerrit.{github_org}.org"
+            if not gerrit_username or not gerrit_password:
+                if not no_netrc:
+                    try:
+                        netrc_creds = get_credentials_for_host(
+                            host=effective_host,
+                            netrc_file=netrc_file,
+                            use_netrc=True,
+                            netrc_optional=netrc_optional,
+                        )
+                        if netrc_creds:
+                            if not gerrit_username:
+                                gerrit_username = netrc_creds.login
+                            if not gerrit_password:
+                                gerrit_password = netrc_creds.password
+                            if not json_output:
+                                console.print("[dim]🔑 Using credentials from .netrc[/dim]")
+                    except NetrcParseError as e:
+                        if not json_output:
+                            console.print(f"[yellow]⚠️  Error parsing .netrc file: {e}[/yellow]")
+                    except FileNotFoundError:
+                        if not netrc_optional:
+                            error_msg = "No .netrc file found and --netrc-required set"
+                            if json_output:
+                                console.print_json(data={"success": False, "error": error_msg})
+                            else:
+                                console.print(f"[red]❌ {error_msg}[/red]")
+                            raise typer.Exit(EXIT_MISSING_CREDENTIALS)
 
             # Auto-detect or validate key type
             detected_type = key_type
@@ -654,6 +717,8 @@ def verify_gerrit(
                     github_org=github_org,
                     username=gerrit_username,
                     password=gerrit_password,
+                    use_netrc=not no_netrc,
+                    netrc_file=netrc_file,
                 ) as client:
                     # Look up account by email or username
                     try:
@@ -690,6 +755,8 @@ def verify_gerrit(
                         github_org=github_org,
                         username=gerrit_username,
                         password=gerrit_password,
+                        use_netrc=not no_netrc,
+                        netrc_file=netrc_file,
                     ) as client:
                         # Look up account by email or username
                         try:
@@ -737,8 +804,9 @@ def verify_gerrit(
                 console.print_json(data=result)
             else:
                 # Create a mock SignatureInfo for display purposes
+                from typing import Literal, cast
+
                 from .models import SignatureInfo
-                from typing import cast, Literal
                 mock_signature = SignatureInfo(
                     type=cast(Literal["gpg", "ssh", "unsigned", "lightweight", "invalid", "gpg-unverifiable"], detected_type),
                     verified=True,  # We're not verifying a signature, just checking registration
@@ -795,7 +863,7 @@ def verify_github(
         "-t",
         help="Key type: 'gpg', 'ssh', or 'auto' (default: auto-detect)",
     ),
-    github_token: Optional[str] = typer.Option(
+    github_token: str | None = typer.Option(
         None,
         "--token",
         envvar="GITHUB_TOKEN",
@@ -892,12 +960,12 @@ def verify_github(
                             "owner": owner,
                         })
                     else:
-                        console.print(f"\n[green]✅ Test Mode: Key parsing successful[/green]")
+                        console.print("\n[green]✅ Test Mode: Key parsing successful[/green]")
                         console.print(f"[bold]Key Type:[/bold] {detected_type}" + (" (auto-detected)" if key_type == "auto" else ""))
                         console.print(f"[bold]Original Input:[/bold] {key_id}")
                         console.print(f"[bold]Normalized Fingerprint:[/bold] {normalized_fingerprint}")
                         console.print(f"[bold]Owner:[/bold] {owner}")
-                        console.print(f"\n[dim]No GitHub API calls made in test mode.[/dim]")
+                        console.print("\n[dim]No GitHub API calls made in test mode.[/dim]")
                 else:  # gpg
                     if json_output:
                         console.print_json(data={
@@ -909,12 +977,12 @@ def verify_github(
                             "owner": owner,
                         })
                     else:
-                        console.print(f"\n[green]✅ Test Mode: Key parsing successful[/green]")
+                        console.print("\n[green]✅ Test Mode: Key parsing successful[/green]")
                         console.print(f"[bold]Key Type:[/bold] {detected_type}" + (" (auto-detected)" if key_type == "auto" else ""))
                         console.print(f"[bold]Original Input:[/bold] {key_id}")
                         console.print(f"[bold]Normalized Key ID:[/bold] {key_id}")
                         console.print(f"[bold]Owner:[/bold] {owner}")
-                        console.print(f"\n[dim]No GitHub API calls made in test mode.[/dim]")
+                        console.print("\n[dim]No GitHub API calls made in test mode.[/dim]")
 
                 import sys
                 sys.exit(EXIT_SUCCESS)
@@ -1047,8 +1115,9 @@ def verify_github(
                 console.print_json(data=result)
             else:
                 # Create a mock SignatureInfo for display purposes
+                from typing import Literal, cast
+
                 from .models import SignatureInfo
-                from typing import cast, Literal
                 mock_signature = SignatureInfo(
                     type=cast(Literal["gpg", "ssh", "unsigned", "lightweight", "invalid", "gpg-unverifiable"], detected_type),
                     verified=True,  # We're not verifying a signature, just checking registration
@@ -1309,7 +1378,7 @@ def validate(
         ...,
         help="Version string to validate (e.g., v1.2.3, 2024.01.15)"
     ),
-    require_type: Optional[str] = typer.Option(
+    require_type: str | None = typer.Option(
         None,
         "--require-type",
         "-t",
@@ -1331,7 +1400,7 @@ def validate(
         "-j",
         help="Output results as JSON",
     ),
-    json_file: Optional[Path] = typer.Option(
+    json_file: Path | None = typer.Option(
         None,
         "--json-file",
         help="Write JSON output to file while showing rich console output",
@@ -1580,13 +1649,13 @@ def verify(
         file_okay=False,
         dir_okay=True,
     ),
-    require_type: Optional[str] = typer.Option(
+    require_type: str | None = typer.Option(
         None,
         "--require-type",
         "-t",
         help="Require specific version type: semver, calver (comma or space-separated for multiple)",
     ),
-    require_signed: Optional[str] = typer.Option(
+    require_signed: str | None = typer.Option(
         None,
         "--require-signed",
         help="Require tag signature. Values: gpg, ssh, gpg-unverifiable, unsigned (comma or space-separated for multiple). Omit for no requirement.",
@@ -1596,39 +1665,57 @@ def verify(
         "--require-github",
         help="Verify signing key is registered on GitHub",
     ),
-    require_gerrit: Optional[str] = typer.Option(
+    require_gerrit: str | None = typer.Option(
         None,
         "--require-gerrit",
         help="Verify signing key is registered on Gerrit. Requires a value: 'true' for auto-discovery from GitHub org (pattern: gerrit.<org>.org), or a specific Gerrit server hostname (e.g. 'gerrit.onap.org'). Example: --require-gerrit gerrit.onap.org",
     ),
-    owner: Optional[str] = typer.Option(
+    owner: str | None = typer.Option(
         None,
         "--owner",
         "-o",
         help="GitHub username or email address for key verification (optional, auto-detected from tagger email if not provided)",
     ),
-    require_owner: Optional[str] = typer.Option(
+    require_owner: str | None = typer.Option(
         None,
         "--require-owner",
         help="GitHub username(s) or email address(es) that must own the signing key (comma or space-separated for multiple). Implies --require-github.",
     ),
-    github_token: Optional[str] = typer.Option(
+    github_token: str | None = typer.Option(
         None,
         "--token",
         envvar="GITHUB_TOKEN",
         help="GitHub API token (or set GITHUB_TOKEN env var)",
     ),
-    gerrit_username: Optional[str] = typer.Option(
+    gerrit_username: str | None = typer.Option(
         None,
         "--gerrit-username",
-        envvar="GERRIT_USERNAME",
-        help="Gerrit username for HTTP authentication (can also use GERRIT_USERNAME env var)",
+        help="Gerrit username for HTTP authentication (priority: CLI > .netrc > GERRIT_USERNAME env var)",
     ),
-    gerrit_password: Optional[str] = typer.Option(
+    gerrit_password: str | None = typer.Option(
         None,
         "--gerrit-password",
-        envvar="GERRIT_PASSWORD",
-        help="Gerrit HTTP password for authentication (can also use GERRIT_PASSWORD env var)",
+        help="Gerrit HTTP password for authentication (priority: CLI > .netrc > GERRIT_PASSWORD env var)",
+    ),
+    no_netrc: bool = typer.Option(
+        False,
+        "--no-netrc",
+        help="Disable .netrc credential lookup for Gerrit authentication",
+    ),
+    netrc_file: Path | None = typer.Option(
+        None,
+        "--netrc-file",
+        help="Explicit path to .netrc file for Gerrit credentials",
+        exists=True,
+        file_okay=True,
+        dir_okay=False,
+        readable=True,
+        resolve_path=True,
+    ),
+    netrc_optional: bool = typer.Option(
+        True,
+        "--netrc-optional/--netrc-required",
+        help="Whether to fail if .netrc file is not found (default: optional)",
     ),
     reject_development: bool = typer.Option(
         False,
@@ -1651,7 +1738,7 @@ def verify(
         "-j",
         help="Output results as JSON",
     ),
-    json_file: Optional[Path] = typer.Option(
+    json_file: Path | None = typer.Option(
         None,
         "--json-file",
         help="Write JSON output to file while showing rich console output",
@@ -1719,6 +1806,8 @@ def verify(
           --require-github --owner user@example.com --token $GITHUB_TOKEN
     """
     async def _verify():
+        nonlocal gerrit_username, gerrit_password
+
         try:
             # Suppress ALL logs when JSON output is requested
             if json_output:
@@ -1786,6 +1875,84 @@ def verify(
                 # When require_owner is specified, require_github is implied
                 config_require_github = True
 
+            # Resolve Gerrit credentials: CLI args > netrc > environment
+            # This is done before parsing require_gerrit to ensure credentials
+            # are available when Gerrit verification is requested
+            if require_gerrit and (not gerrit_username or not gerrit_password):
+                if not no_netrc:
+                    # Determine effective host for netrc lookup
+                    if require_gerrit == "true":
+                        # Auto-discovery pattern: we don't know the host yet,
+                        # but we can validate that .netrc exists and is parseable
+                        # when --netrc-required is set. The actual credential
+                        # lookup will happen later in GerritKeysClient.
+                        try:
+                            netrc_path = find_netrc_file(
+                                search_local=True,
+                                explicit_path=netrc_file,
+                            )
+                            if netrc_path is None:
+                                if not netrc_optional:
+                                    error_msg = (
+                                        "No .netrc file found and "
+                                        "--netrc-required set"
+                                    )
+                                    if json_output:
+                                        console.print_json(
+                                            data={
+                                                "success": False,
+                                                "error": error_msg,
+                                            }
+                                        )
+                                    else:
+                                        console.print(
+                                            f"[red]❌ {error_msg}[/red]"
+                                        )
+                                    raise typer.Exit(EXIT_MISSING_CREDENTIALS)
+                            else:
+                                # Validate the file is parseable
+                                load_netrc(path=netrc_path, search_local=False)
+                                if not json_output:
+                                    console.print(
+                                        "[dim]🔑 .netrc file found; "
+                                        "credentials will be resolved after "
+                                        "Gerrit server discovery[/dim]"
+                                    )
+                        except NetrcParseError as e:
+                            if not json_output:
+                                console.print(
+                                    f"[yellow]⚠️  Error parsing "
+                                    f".netrc file: {e}[/yellow]"
+                                )
+                    else:
+                        # Specific server provided
+                        effective_host = require_gerrit
+                        try:
+                            netrc_creds = get_credentials_for_host(
+                                host=effective_host,
+                                netrc_file=netrc_file,
+                                use_netrc=True,
+                                netrc_optional=netrc_optional,
+                            )
+                            if netrc_creds:
+                                if not gerrit_username:
+                                    gerrit_username = netrc_creds.login
+                                if not gerrit_password:
+                                    gerrit_password = netrc_creds.password
+                                if not json_output:
+                                    console.print("[dim]🔑 Using credentials from .netrc[/dim]")
+                        except NetrcParseError as e:
+                            if not json_output:
+                                console.print(f"[yellow]⚠️  Error parsing .netrc file: {e}[/yellow]")
+                        except FileNotFoundError:
+                            if not netrc_optional:
+                                error_msg = "No .netrc file found and --netrc-required set"
+                                if json_output:
+                                    console.print_json(data={"success": False, "error": error_msg})
+                                else:
+                                    console.print(f"[red]❌ {error_msg}[/red]")
+                                raise typer.Exit(EXIT_MISSING_CREDENTIALS)
+
             # Parse require_gerrit option
             config_require_gerrit = False
             gerrit_server = None
@@ -1820,6 +1987,8 @@ def verify(
                 repo_path=repo_path,
                 gerrit_username=gerrit_username,
                 gerrit_password=gerrit_password,
+                use_netrc=not no_netrc,
+                netrc_file=netrc_file,
             )
 
             # Resolve owner parameter (email or username) to username if provided
