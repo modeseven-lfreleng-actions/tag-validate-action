@@ -467,7 +467,7 @@ When using the Python CLI (`tag-validate`), the following exit codes are returne
 - Exit code `5` (EXIT_MISSING_CREDENTIALS) is returned when:
   - `--require-gerrit` flag is used but Gerrit credentials are not provided
   - Gerrit server requires authentication but `GERRIT_USERNAME` or `GERRIT_PASSWORD`
-    environment variables are not set
+    environment variables are not set (and no `.netrc` entry exists)
 
 - Exit code `6` (EXIT_AUTH_FAILED) is returned when:
   - Gerrit credentials are provided but authentication fails
@@ -520,6 +520,46 @@ case $exit_code in
     ;;
 esac
 ```
+
+## Using .netrc Files
+
+Tag-validate supports loading Gerrit credentials from `.netrc` files, following
+the standard format used by curl and other tools.
+
+**Search order:**
+
+1. `.netrc` in the current directory
+2. `~/.netrc` in your home directory
+3. `~/_netrc` (Windows fallback)
+
+**Example `.netrc` file:**
+
+```text
+machine gerrit.onap.org login myuser password mytoken
+machine gerrit.opendaylight.org login myuser password anothertoken
+```
+
+**CLI options:**
+
+| Option | Description |
+| ------ | ----------- |
+| `--no-netrc` | Disable .netrc file lookup |
+| `--netrc-file PATH` | Use a specific .netrc file |
+| `--netrc-optional` | Do not fail if .netrc file is missing (default) |
+| `--netrc-required` | Require a .netrc file and fail if missing |
+
+By default, `.netrc` lookup is optional (`--netrc-optional`): if no `.netrc`
+file is found, the tool continues and falls back to environment variables.
+Use `--netrc-required` to enforce that a `.netrc` file must be present.
+
+When a `.netrc` file is present, credentials load automatically. Explicit
+environment variables or CLI arguments take precedence over `.netrc` entries.
+
+**Credential Priority Order:**
+
+1. **CLI arguments** (highest priority)
+2. **`.netrc` file** (if not disabled with `--no-netrc`)
+3. **Environment variables** (e.g., `GERRIT_USERNAME`, `GERRIT_PASSWORD`)
 
 ## Tag Detection Priority
 

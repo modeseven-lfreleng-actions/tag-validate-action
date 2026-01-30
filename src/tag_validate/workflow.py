@@ -35,14 +35,13 @@ import logging
 import re
 import subprocess
 from pathlib import Path
-from typing import Optional
 
 from .display_utils import format_server_display, format_user_details
 from .gerrit_keys import (
-    GerritKeysClient,
-    GerritServerError,
-    GerritMissingCredentialsError,
     GerritInvalidCredentialsError,
+    GerritKeysClient,
+    GerritMissingCredentialsError,
+    GerritServerError,
 )
 from .github_keys import GitHubKeysClient
 from .models import (
@@ -77,9 +76,11 @@ class ValidationWorkflow:
     def __init__(
         self,
         config: ValidationConfig,
-        repo_path: Optional[Path] = None,
-        gerrit_username: Optional[str] = None,
-        gerrit_password: Optional[str] = None,
+        repo_path: Path | None = None,
+        gerrit_username: str | None = None,
+        gerrit_password: str | None = None,
+        use_netrc: bool = True,
+        netrc_file: Path | str | None = None,
     ):
         """Initialize the validation workflow.
 
@@ -88,22 +89,31 @@ class ValidationWorkflow:
             repo_path: Path to Git repository (default: current directory)
             gerrit_username: Gerrit username for HTTP authentication (optional)
             gerrit_password: Gerrit HTTP password for authentication (optional)
+            use_netrc: Whether to use .netrc for credential lookup (default: True)
+            netrc_file: Explicit path to .netrc file (optional)
 
         Security Note:
             Credentials (gerrit_password) are stored in memory only for the duration
             of operations and are never logged or included in error messages.
             The password is masked in string representations to prevent accidental exposure.
+
+        Credential Priority:
+            1. Explicit CLI arguments (gerrit_username/gerrit_password)
+            2. .netrc file (if use_netrc=True)
+            3. Environment variables (GERRIT_USERNAME/GERRIT_PASSWORD)
         """
         self.config = config
         self.repo_path = repo_path or Path.cwd()
         self.gerrit_username = gerrit_username
         self.gerrit_password = gerrit_password
+        self.use_netrc = use_netrc
+        self.netrc_file = Path(netrc_file) if isinstance(netrc_file, str) else netrc_file
 
         # Initialize components
         self.validator: TagValidator = TagValidator()
         self.detector: SignatureDetector = SignatureDetector(self.repo_path)
         self.operations: TagOperations = TagOperations()
-        self._current_github_org: Optional[str] = None
+        self._current_github_org: str | None = None
 
         logger.debug(f"Initialized ValidationWorkflow with config: {config}")
 
@@ -138,9 +148,9 @@ class ValidationWorkflow:
     async def validate_tag(
         self,
         tag_name: str,
-        github_user: Optional[str] = None,
-        github_token: Optional[str] = None,
-        require_owners: Optional[list[str]] = None,
+        github_user: str | None = None,
+        github_token: str | None = None,
+        require_owners: list[str] | None = None,
     ) -> ValidationResult:
         """Perform complete tag validation.
 
@@ -332,6 +342,8 @@ class ValidationWorkflow:
                         server=gerrit_server,
                         username=self.gerrit_username,
                         password=self.gerrit_password,
+                        use_netrc=self.use_netrc,
+                        netrc_file=self.netrc_file,
                     ) as test_client:
                         connection_ok, connection_error = await test_client.verify_connection()
                         if not connection_ok:
@@ -675,8 +687,8 @@ class ValidationWorkflow:
         self,
         signature_info: SignatureInfo,
         github_user: str,
-        github_token: Optional[str] = None,
-        require_owners: Optional[list[str]] = None,
+        github_token: str | None = None,
+        require_owners: list[str] | None = None,
     ) -> KeyVerificationResult:
         """Verify signing key on GitHub.
 
@@ -816,8 +828,8 @@ class ValidationWorkflow:
         self,
         signature_info: SignatureInfo,
         gerrit_server: str,
-        github_org: Optional[str] = None,
-        require_owners: Optional[list[str]] = None,
+        github_org: str | None = None,
+        require_owners: list[str] | None = None,
     ) -> KeyVerificationResult:
         """Verify signing key on Gerrit.
 
@@ -845,6 +857,8 @@ class ValidationWorkflow:
             github_org=github_org,
             username=self.gerrit_username,
             password=self.gerrit_password,
+            use_netrc=self.use_netrc,
+            netrc_file=self.netrc_file,
         ) as client:
             # Look up account by email
             account = await client.lookup_account_by_email(tagger_email)
@@ -912,7 +926,7 @@ class ValidationWorkflow:
             logger.debug(f"Gerrit key verification result: registered={result.key_registered}")
             return result
 
-    def _extract_github_org_from_context(self) -> Optional[str]:
+    def _extract_github_org_from_context(self) -> str | None:
         """Extract GitHub organization from current validation context.
 
         This method attempts to determine the GitHub organization from:
@@ -968,9 +982,9 @@ class ValidationWorkflow:
     async def validate_tag_location(
         self,
         tag_location: str,
-        github_user: Optional[str] = None,
-        github_token: Optional[str] = None,
-        require_owners: Optional[list[str]] = None,
+        github_user: str | None = None,
+        github_token: str | None = None,
+        require_owners: list[str] | None = None,
     ) -> ValidationResult:
         """Validate a tag from a location string with smart path detection.
 
@@ -1257,7 +1271,7 @@ class ValidationWorkflow:
             elif v.version_type == "calver":
                 lines.append(f"  Date: {v.year}.{v.month}.{v.day or v.micro}")
             if v.is_development:
-                lines.append(f"  Development: Yes")
+                lines.append("  Development: Yes")
             lines.append("")
 
         # Signature info
@@ -1289,9 +1303,9 @@ class ValidationWorkflow:
             if s.type in ["gpg", "ssh", "gpg-unverifiable", "invalid"]:
                 lines.append(f"  Key Type: {sig_type}")
                 if s.type == "gpg-unverifiable":
-                    lines.append(f"  Status: Key not available for verification")
+                    lines.append("  Status: Key not available for verification")
                 elif s.type == "invalid":
-                    lines.append(f"  Status: Signature is corrupted or tampered")
+                    lines.append("  Status: Signature is corrupted or tampered")
                 if s.signer_email:
                     lines.append(f"  Signer: {s.signer_email}")
                 if s.key_id:
