@@ -79,15 +79,22 @@ class GitHubKeysClient:
         # Extract server hostname from api_url (e.g., "api.github.com" -> "github.com")
         # For GitHub.com, use "github.com", for GHE use the hostname
         from urllib.parse import urlparse
-        hostname = urlparse(api_url).hostname or ""
+        # Normalize scheme-less inputs (e.g. "api.github.com") so the host is
+        # parsed from netloc rather than being treated as a path.
+        normalized_url = api_url if "://" in api_url else f"https://{api_url}"
+        parsed = urlparse(normalized_url)
+        hostname = parsed.hostname or ""
         if hostname == "api.github.com":
             self.server = "github.com"
         else:
-            # Extract hostname from URL for GitHub Enterprise
-            # Remove 'api.' prefix if present (e.g., api.github.example.com -> github.example.com)
-            if hostname.startswith("api."):
-                hostname = hostname[4:]
-            self.server = hostname
+            # Extract host for GitHub Enterprise from netloc so any explicit
+            # port is preserved (e.g. ghe.example.com:8443), stripping any
+            # userinfo. Remove a leading 'api.' prefix if present
+            # (e.g. api.github.example.com -> github.example.com).
+            server = parsed.netloc.rsplit("@", 1)[-1]
+            if server.startswith("api."):
+                server = server[4:]
+            self.server = server
 
     async def __aenter__(self) -> "GitHubKeysClient":
         """Async context manager entry."""

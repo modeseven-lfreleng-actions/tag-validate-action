@@ -2055,7 +2055,7 @@ def verify(
                         except Exception as file_error:
                             logger.error(f"Failed to write JSON to file {json_file}: {file_error}")
 
-                    raise typer.Exit(0) from e
+                    raise typer.Exit(0) from None
                 else:
                     # Re-raise if not a missing tag error or permit_missing is false
                     raise

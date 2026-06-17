@@ -774,7 +774,10 @@ def resolve_gerrit_credentials(
             username=env_user,
             password=env_pass,
             source=CredentialSource.ENVIRONMENT,
-            source_detail=f"{env_username_var}/{env_password_var}",
+            # Record only the username variable name; including the password
+            # variable name risks it being surfaced in logs via
+            # auth_method_display().
+            source_detail=env_username_var,
         )
 
     # 4. Try fallback environment variables
@@ -792,7 +795,8 @@ def resolve_gerrit_credentials(
                 username=fallback_user,
                 password=fallback_pass,
                 source=CredentialSource.ENVIRONMENT,
-                source_detail=f"{fallback_env_username_var}/{fallback_env_password_var}",
+                # Record only the username variable name (see above).
+                source_detail=fallback_env_username_var,
             )
 
     log.debug("No Gerrit credentials found from any source")
