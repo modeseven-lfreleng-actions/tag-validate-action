@@ -1030,7 +1030,12 @@ class ValidationWorkflow:
         logger.debug(f"Validating tag location: {tag_location}")
 
         # Check if it's a remote location or local tag
-        if "@" in tag_location and ("/" in tag_location or "github.com" in tag_location):
+        from urllib.parse import urlparse
+        parsed_host = urlparse(tag_location).hostname or ""
+        is_github_host = parsed_host == "github.com" or parsed_host.endswith(
+            ".github.com"
+        )
+        if "@" in tag_location and ("/" in tag_location or is_github_host):
             # Definite remote tag - parse and clone
             try:
                 owner, repo, tag = self.operations.parse_tag_location(tag_location)

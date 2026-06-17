@@ -78,14 +78,13 @@ class GitHubKeysClient:
 
         # Extract server hostname from api_url (e.g., "api.github.com" -> "github.com")
         # For GitHub.com, use "github.com", for GHE use the hostname
-        if "api.github.com" in api_url:
+        from urllib.parse import urlparse
+        hostname = urlparse(api_url).hostname or ""
+        if hostname == "api.github.com":
             self.server = "github.com"
         else:
             # Extract hostname from URL for GitHub Enterprise
-            from urllib.parse import urlparse
-            parsed = urlparse(api_url)
             # Remove 'api.' prefix if present (e.g., api.github.example.com -> github.example.com)
-            hostname = parsed.netloc
             if hostname.startswith("api."):
                 hostname = hostname[4:]
             self.server = hostname

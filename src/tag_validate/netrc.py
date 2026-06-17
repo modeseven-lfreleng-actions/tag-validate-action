@@ -768,9 +768,8 @@ def resolve_gerrit_credentials(
 
     if env_user and env_pass:
         log.debug(
-            "Using credentials from environment variables %s/%s",
+            "Using credentials from environment variables (username var: %s)",
             env_username_var,
-            env_password_var,
         )
         return GerritCredentials(
             username=env_user,
@@ -786,9 +785,9 @@ def resolve_gerrit_credentials(
 
         if fallback_user and fallback_pass:
             log.debug(
-                "Using credentials from fallback environment variables %s/%s",
+                "Using credentials from fallback environment variables "
+                "(username var: %s)",
                 fallback_env_username_var,
-                fallback_env_password_var,
             )
             return GerritCredentials(
                 username=fallback_user,
