@@ -686,8 +686,11 @@ class TestErrorHandling:
             async with GerritKeysClient(server="gerrit.onap.org") as client:
                 success, error = await client.verify_connection()
                 assert success is False
-                assert "Credentials required" in error
-                assert "gerrit.onap.org" in error
+                assert error == (
+                    "Credentials required: Gerrit server "
+                    "'gerrit.onap.org' requires authentication. "
+                    "No username or password provided."
+                )
 
     @pytest.mark.asyncio
     async def test_verify_connection_auth_failed(self):
