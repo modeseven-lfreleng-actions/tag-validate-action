@@ -182,11 +182,20 @@ runs:
     - name: 'Install local dependencies'
       if: inputs.use_local_action == 'true' || contains(github.repository, 'lfreleng-actions/tag-validate-action')
       shell: bash
-      run: |
+      env:
+        GITHUB_ACTION_PATH: ${{ github.action_path }}
+      # The PYTHONPATH write to GITHUB_ENV exposes the action's bundled
+      # source directory to subsequent steps; it is env-by-nature (no output
+      # equivalent) and built from the trusted github.action_path, not from
+      # untrusted input, so the github-env write is safe and intentional.
+      # zizmor evaluates github-env at run-block granularity, so the ignore
+      # must sit on the run: line (a trailing comment on the echo line is
+      # not recognised by this zizmor version).
+      run: | # zizmor: ignore[github-env]
         # Install dependencies without the package itself to avoid setuptools-scm issues
         pip install dependamerge>=0.1.19 aiolimiter>=1.2.1 "httpx[http2]>=0.28.1" pydantic>=2.12.5 rich>=14.2.0 typer>=0.21.1 python-gnupg>=0.5.3 cryptography>=46.0.3 packaging>=24.2 pygerrit2>=2.0.15
         # Add the source directory to PYTHONPATH for direct module access
-        echo "PYTHONPATH=${{ github.action_path }}/src:${PYTHONPATH:-}" >> "$GITHUB_ENV"
+        echo "PYTHONPATH=${GITHUB_ACTION_PATH}/src:${PYTHONPATH:-}" >> "$GITHUB_ENV"
 
     - name: 'Verify Python module import'
       if: inputs.use_local_action == 'true' || contains(github.repository, 'lfreleng-actions/tag-validate-action')
@@ -235,31 +244,35 @@ runs:
         # Run tag-validate Python CLI with rich output
         set -euo pipefail
 
-        # Normalize inputs to lowercase for case-insensitive matching
-        REQUIRE_TYPE=$(echo "${{ inputs.require_type }}" | tr '[:upper:]' '[:lower:]' | tr -d ' ')
-        REQUIRE_SIGNED=$(echo "${{ inputs.require_signed }}" | tr '[:upper:]' '[:lower:]' | tr -d ' ')
-        REQUIRE_GITHUB=$(echo "${{ inputs.require_github }}" | tr '[:upper:]' '[:lower:]')
-        REQUIRE_GERRIT=$(echo "${{ inputs.require_gerrit }}" | tr '[:upper:]' '[:lower:]')
-        REQUIRE_OWNER="${{ inputs.require_owner }}"
-        REJECT_DEVELOPMENT=$(echo "${{ inputs.reject_development }}" | tr '[:upper:]' '[:lower:]')
-        PERMIT_MISSING=$(echo "${{ inputs.permit_missing }}" | tr '[:upper:]' '[:lower:]')
-        DEBUG=$(echo "${{ inputs.debug }}" | tr '[:upper:]' '[:lower:]')
-        USE_LOCAL_ACTION=$(echo "${{ inputs.use_local_action }}" | tr '[:upper:]' '[:lower:]')
-        UPLOAD_JSON=$(echo "${{ inputs.upload_json }}" | tr '[:upper:]' '[:lower:]')
-        JSON_UPLOAD_FORMAT=$(echo "${{ inputs.json_upload_format }}" | tr '[:upper:]' '[:lower:]')
-        GITHUB_STEP_SUMMARY_ENABLED=$(echo "${{ inputs.github_step_summary }}" | tr '[:upper:]' '[:lower:]')
+        # Normalize inputs to lowercase for case-insensitive matching.
+        # printf '%s\n' is used instead of echo so values beginning with
+        # -n/-e or containing backslash escapes are passed through
+        # literally (echo's option/escape handling is implementation-
+        # defined).
+        REQUIRE_TYPE=$(printf '%s\n' "${INPUTS_REQUIRE_TYPE}" | tr '[:upper:]' '[:lower:]' | tr -d ' ')
+        REQUIRE_SIGNED=$(printf '%s\n' "${INPUTS_REQUIRE_SIGNED}" | tr '[:upper:]' '[:lower:]' | tr -d ' ')
+        REQUIRE_GITHUB=$(printf '%s\n' "${INPUTS_REQUIRE_GITHUB}" | tr '[:upper:]' '[:lower:]')
+        REQUIRE_GERRIT=$(printf '%s\n' "${INPUTS_REQUIRE_GERRIT}" | tr '[:upper:]' '[:lower:]')
+        REQUIRE_OWNER="${INPUTS_REQUIRE_OWNER}"
+        REJECT_DEVELOPMENT=$(printf '%s\n' "${INPUTS_REJECT_DEVELOPMENT}" | tr '[:upper:]' '[:lower:]')
+        PERMIT_MISSING=$(printf '%s\n' "${INPUTS_PERMIT_MISSING}" | tr '[:upper:]' '[:lower:]')
+        DEBUG=$(printf '%s\n' "${INPUTS_DEBUG}" | tr '[:upper:]' '[:lower:]')
+        USE_LOCAL_ACTION=$(printf '%s\n' "${INPUTS_USE_LOCAL_ACTION}" | tr '[:upper:]' '[:lower:]')
+        UPLOAD_JSON=$(printf '%s\n' "${INPUTS_UPLOAD_JSON}" | tr '[:upper:]' '[:lower:]')
+        JSON_UPLOAD_FORMAT=$(printf '%s\n' "${INPUTS_JSON_UPLOAD_FORMAT}" | tr '[:upper:]' '[:lower:]')
+        GITHUB_STEP_SUMMARY_ENABLED=$(printf '%s\n' "${INPUTS_GITHUB_STEP_SUMMARY}" | tr '[:upper:]' '[:lower:]')
 
         # Build command arguments
         USE_VERSION_ONLY="false"
 
         # Determine tag location or string
-        if [ -n "${{ inputs.tag_location }}" ]; then
-          TAG_LOCATION="${{ inputs.tag_location }}"
+        if [ -n "${INPUTS_TAG_LOCATION}" ]; then
+          TAG_LOCATION="${INPUTS_TAG_LOCATION}"
           # Python CLI now handles format normalization (owner/repo/tag → owner/repo@tag)
-        elif [ -n "${{ inputs.tag_string }}" ]; then
+        elif [ -n "${INPUTS_TAG_STRING}" ]; then
           # For tag_string, use validate-version command
           USE_VERSION_ONLY="true"
-          TAG_LOCATION="${{ inputs.tag_string }}"
+          TAG_LOCATION="${INPUTS_TAG_STRING}"
         elif [[ "${GITHUB_REF:-}" == refs/tags/* ]]; then
           # Auto-detect from tag push event
           TAG_LOCATION="${GITHUB_REF_NAME:-}"
@@ -325,13 +338,11 @@ runs:
           VERIFY_ARGS+=("--require-gerrit" "${REQUIRE_GERRIT}")
         fi
 
-        # Add Gerrit authentication if provided
-        if [ -n "${{ inputs.gerrit_username }}" ]; then
-          VERIFY_ARGS+=("--gerrit-username" "${{ inputs.gerrit_username }}")
-        fi
-        if [ -n "${{ inputs.gerrit_password }}" ]; then
-          VERIFY_ARGS+=("--gerrit-password" "${{ inputs.gerrit_password }}")
-        fi
+        # Gerrit authentication is supplied to the CLI via the
+        # GERRIT_USERNAME / GERRIT_PASSWORD environment variables (set in
+        # the env: section below). They are deliberately NOT passed as
+        # CLI arguments, which would expose the password in the process
+        # argument list and in the "🔍 Executing" debug log line.
 
         # Add require-owner if provided (comma or space separated values)
         if [ -n "${REQUIRE_OWNER}" ]; then
@@ -552,8 +563,22 @@ runs:
       env:
         GITHUB_TOKEN: ${{ inputs.token }}
         GITHUB_SERVER_URL: ${{ inputs.github_server_url || env.GITHUB_SERVER_URL || 'https://github.com' }}
-        GERRIT_USERNAME: ${{ inputs.gerrit_username }}
-        GERRIT_PASSWORD: ${{ inputs.gerrit_password }}
+        GERRIT_USERNAME: ${{ inputs.gerrit_username || env.GERRIT_USERNAME }}
+        GERRIT_PASSWORD: ${{ inputs.gerrit_password || env.GERRIT_PASSWORD }}
+        INPUTS_REQUIRE_TYPE: ${{ inputs.require_type }}
+        INPUTS_REQUIRE_SIGNED: ${{ inputs.require_signed }}
+        INPUTS_REQUIRE_GITHUB: ${{ inputs.require_github }}
+        INPUTS_REQUIRE_GERRIT: ${{ inputs.require_gerrit }}
+        INPUTS_REQUIRE_OWNER: ${{ inputs.require_owner }}
+        INPUTS_REJECT_DEVELOPMENT: ${{ inputs.reject_development }}
+        INPUTS_PERMIT_MISSING: ${{ inputs.permit_missing }}
+        INPUTS_DEBUG: ${{ inputs.debug }}
+        INPUTS_USE_LOCAL_ACTION: ${{ inputs.use_local_action }}
+        INPUTS_UPLOAD_JSON: ${{ inputs.upload_json }}
+        INPUTS_JSON_UPLOAD_FORMAT: ${{ inputs.json_upload_format }}
+        INPUTS_GITHUB_STEP_SUMMARY: ${{ inputs.github_step_summary }}
+        INPUTS_TAG_LOCATION: ${{ inputs.tag_location }}
+        INPUTS_TAG_STRING: ${{ inputs.tag_string }}
 
     - name: 'Upload JSON artifact'
       if: always() && inputs.upload_json == 'true' && steps.validate.outputs.artifact_path != ''
